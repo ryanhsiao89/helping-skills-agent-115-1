@@ -1,6 +1,6 @@
 """Google Sheets 持久化層。
 
-使用一份試算表中的 Sessions、ChatLogs、SkillEvents、Assessments 四個工作表。
+使用一份試算表中的 Sessions、ChatLogs、SkillEvents、Assessments、ContinuityMemory 工作表。
 所有寫入採 RAW，避免學生輸入被 Google Sheets 解讀為公式。
 """
 
@@ -66,6 +66,9 @@ class NullStore:
 
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         return []
+
+    def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
+        return None
 
 
 class SheetsStore:
@@ -153,6 +156,30 @@ class SheetsStore:
             1 for row in participant_rows if row.get("completion_status") in completed_statuses
         )
         return UsageSummary(started=len(participant_rows), completed=completed)
+
+    def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
+        """取得同一匿名學習者最新一筆已保存的跨次續談記憶。"""
+        participant_id = participant_id.strip()
+        if not participant_id:
+            return None
+        records = self.read_all("ContinuityMemory")
+        rows = [
+            row
+            for row in records
+            if str(row.get("participant_id", "")).strip() == participant_id
+            and str(row.get("memory_status", "")).strip() in {"ready", "fallback"}
+        ]
+        if not rows:
+            return None
+
+        def sort_key(row: dict[str, Any]) -> tuple[str, int]:
+            try:
+                number = int(row.get("session_number", 0) or 0)
+            except (TypeError, ValueError):
+                number = 0
+            return (str(row.get("updated_at", "")), number)
+
+        return dict(max(rows, key=sort_key))
 
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         try:
