@@ -20,12 +20,24 @@ def normalize_email(email: str) -> str:
     return str(email or "").strip().lower()
 
 
-def email_allowed(email: str, allowed_domains: tuple[str, ...]) -> bool:
+def email_allowed(
+    email: str,
+    allowed_domains: tuple[str, ...],
+    allowed_emails: tuple[str, ...] = (),
+) -> bool:
+    """允許指定學校網域，或教師明確列出的測試 Email；不開放整個私人網域。"""
     normalized = normalize_email(email)
     if not EMAIL_PATTERN.fullmatch(normalized):
         return False
-    if not allowed_domains:
-        return False
+
+    normalized_emails = {
+        normalize_email(item)
+        for item in allowed_emails
+        if normalize_email(item)
+    }
+    if normalized in normalized_emails:
+        return True
+
     domain = normalized.rsplit("@", 1)[1]
     normalized_domains = tuple(
         str(item).strip().lower().lstrip("@")
