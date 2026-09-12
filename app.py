@@ -12,6 +12,7 @@ import streamlit as st
 from src.assessment_models import AssessmentResult
 from src.cases import EXPERIENCE_TOPICS, PRACTICE_CASES, case_options, get_case
 from src.constants import AGENT_TYPE, MODE_LABELS, STAGE_LABELS, STAGES
+from src.continuity import build_memory_record, pin_digest, pin_matches, valid_pin
 from src.gemini_gateway import GatewayError, GeminiGateway
 from src.prompts import (
     dialogue_system_prompt,
@@ -26,7 +27,6 @@ from src.sheets_store import NullStore, SheetsStore, SheetsStoreError
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 PARTICIPANT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
-
 
 st.set_page_config(
     page_title="助人技巧訓練 Agent",
@@ -54,6 +54,7 @@ def init_state() -> None:
         "admin_ok": False,
         # 僅保存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
         "student_api_key": "",
+        "start_mode": "experience",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -71,7 +72,7 @@ def cached_store(service_account_json: str, spreadsheet_id: str):
 
 
 def load_runtime() -> tuple[Settings, object, str]:
-    """載入教師端系統設定與 Google Sheets；Gemini Key 不再從教師端 Secrets 取用。"""
+    """載入教師端系統設定與 Google Sheets；Gemini Key 不從教師端 Secrets 取用。"""
     settings = load_settings(st.secrets)
     store_error = ""
     try:
@@ -88,7 +89,6 @@ def build_student_gateway(settings: Settings) -> tuple[GeminiGateway | None, str
     if not api_key:
         return None, ""
     try:
-        # 不使用 st.cache_resource，避免學生 API Key / Gateway 被跨 session 快取。
         return GeminiGateway(api_keys=(api_key,), model_name=settings.model_name), ""
     except ValueError as exc:
         return None, str(exc)
@@ -145,6 +145,16 @@ def log_message(
 
 def initial_message(session: dict) -> tuple[str, str, str]:
     if session["mode"] == "experience":
+        prior = session.get("continuity_memory")
+        if prior:
+            opening = str(prior.get("next_opening", "") or "").strip()
+            if not opening:
+                opening = (
+                    "上次我們談過一段近況。今天你想從上次談到的地方繼續，"
+                    "還是先說說這幾天有什麼變化？"
+                )
+            return opening, "ai_counselor", "assistant"
+
         topic = EXPERIENCE_TOPICS[session["experience_topic_id"]]
         content = (
             f"你好，這裡是助人技巧的教學體驗。我會先陪你談一小段「{topic}」相關的低至中度壓力經驗。"
@@ -193,6 +203,9 @@ def start_session(
     experience_topic_id: str,
     case_id: str,
     training_path: str,
+    conversation_action: str = "new",
+    continuity_pin_hash: str = "",
+    prior_memory: dict | None = None,
 ) -> None:
     usage = store.usage_summary(participant_id)
     if mode == "experience":
@@ -206,6 +219,18 @@ def start_session(
         stage_start = training_path
         current_stage = training_path
 
+    if mode == "experience" and conversation_action == "continue" and prior_memory:
+        conversation_id = str(prior_memory.get("conversation_id", "") or str(uuid.uuid4()))
+        parent_session_id = str(prior_memory.get("session_id", "") or "")
+        try:
+            conversation_session_number = int(prior_memory.get("session_number", 1) or 1) + 1
+        except (TypeError, ValueError):
+            conversation_session_number = 2
+    else:
+        conversation_id = str(uuid.uuid4())
+        parent_session_id = ""
+        conversation_session_number = 1
+
     session = {
         "session_id": str(uuid.uuid4()),
         "participant_id": participant_id,
@@ -213,6 +238,7 @@ def start_session(
         "started_at": now_iso(),
         "duration_target_min": duration_target_min,
         "experience_topic_id": experience_topic_id,
+        "experience_topic_label": EXPERIENCE_TOPICS.get(experience_topic_id, ""),
         "case_id": case_id,
         "training_path": training_path,
         "stage_start": stage_start,
@@ -223,6 +249,14 @@ def start_session(
         "ended_at": "",
         "completion_status": "in_progress",
         "usage_number": usage.started + 1,
+        "conversation_action": conversation_action if mode == "experience" else "new",
+        "conversation_id": conversation_id,
+        "parent_session_id": parent_session_id,
+        "conversation_session_number": conversation_session_number,
+        "continuity_pin_hash": continuity_pin_hash if mode == "experience" else "",
+        # 只存在本次 Streamlit session；傳給模型時 prompts.py 會過濾掉 PIN hash/IDs。
+        "continuity_memory": prior_memory if mode == "experience" and conversation_action == "continue" else None,
+        "continuity_saved": False,
     }
 
     store.append_record("Sessions", build_session_record(session, status="in_progress"))
@@ -236,6 +270,27 @@ def start_session(
     log_message(store=store, content=content, speaker_role=speaker_role, ui_role=ui_role)
 
 
+def save_continuity_memory(
+    *,
+    store,
+    session: dict,
+    continuity: dict | None,
+    updated_at: str,
+    status: str,
+) -> None:
+    if session.get("mode") != "experience" or not session.get("continuity_pin_hash"):
+        return
+    record = build_memory_record(
+        session=session,
+        messages=st.session_state.messages,
+        updated_at=updated_at,
+        continuity=continuity,
+        status=status,
+    )
+    store.append_record("ContinuityMemory", record)
+    session["continuity_saved"] = True
+
+
 def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> None:
     session = st.session_state.active_session
     if not session or session.get("ended_at"):
@@ -244,6 +299,8 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
     assessment_status = "completed"
     assessment_id = str(uuid.uuid4())
     created_at = now_iso()
+    continuity_for_memory: dict | None = None
+    memory_status = "fallback"
 
     if gateway is None:
         assessment_status = "completed_evaluation_error"
@@ -259,6 +316,8 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
             )
             parsed = result.parsed.model_dump()
             st.session_state.assessment = parsed
+            continuity_for_memory = parsed.get("continuity") or None
+            memory_status = "ready"
 
             quoted_examples = [
                 {
@@ -332,6 +391,19 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                 )
             except SheetsStoreError:
                 pass
+
+    # 即使形成性評量失敗，體驗模式仍保存「最後幾輪」fallback，避免隔天完全失去續談脈絡。
+    if session.get("mode") == "experience":
+        try:
+            save_continuity_memory(
+                store=store,
+                session=session,
+                continuity=continuity_for_memory,
+                updated_at=created_at,
+                status=memory_status,
+            )
+        except SheetsStoreError as exc:
+            st.session_state.logging_error = str(exc)
 
     ended_at = now_iso()
     session["ended_at"] = ended_at
@@ -415,6 +487,7 @@ def handle_user_turn(
     prompt = dialogue_turn_input(
         st.session_state.messages,
         max_chars=settings.max_history_chars,
+        continuity_memory=session.get("continuity_memory"),
     )
     try:
         result = gateway.generate_text(
@@ -441,7 +514,7 @@ def handle_user_turn(
 
 
 def reset_for_new_session() -> None:
-    # 清除上一段練習資料，但保留學生 API Key，方便同一位學生在自己的筆電繼續下一段練習。
+    # 清除上一段練習資料，但保留學生 API Key；跨日重新開瀏覽器時仍需重新貼 Key。
     for key in (
         "active_session",
         "messages",
@@ -491,7 +564,7 @@ settings, store, store_error = load_runtime()
 gateway, gateway_error = build_student_gateway(settings)
 
 st.title("助人技巧訓練 Agent")
-st.caption("教學模擬、技能演練、歷程紀錄與形成性回饋")
+st.caption("教學模擬、技能演練、跨次續談、歷程紀錄與形成性回饋")
 st.warning(
     "本系統僅供教學演練，不提供心理治療、診斷或緊急危機服務。請勿輸入真實個案姓名、電話、地址、學校或機構等可識別資訊。",
     icon="⚠️",
@@ -507,6 +580,7 @@ with st.sidebar:
         st.info("Gemini：請由學生輸入自己的 API Key")
     if store.enabled:
         st.success("Google Sheets：已連線")
+        st.caption("續談記憶：由匿名學習者代碼＋6 位 PIN 驗證")
     elif settings.require_sheets:
         st.error("Google Sheets：尚未連線")
     else:
@@ -521,6 +595,16 @@ session = st.session_state.active_session
 
 if not session:
     st.subheader("開始一段練習")
+
+    # 放在 form 外，使切換模式時能立即更新相應表單欄位。
+    mode = st.radio(
+        "訓練模式",
+        options=list(MODE_LABELS),
+        format_func=lambda value: MODE_LABELS[value],
+        key="start_mode",
+        horizontal=True,
+    )
+
     with st.form("start_session_form"):
         participant_id = st.text_input(
             "匿名學習者代碼",
@@ -535,20 +619,14 @@ if not session:
             placeholder="請貼上你自己的 Gemini API Key",
             help=(
                 "此 Key 只暫存在你目前的 Streamlit 瀏覽器 session，"
-                "可供同一位學生連續進行多段練習；不會寫入 Google Sheets、逐字稿或評量紀錄。"
+                "不會寫入 Google Sheets、逐字稿或評量紀錄。"
             ),
         ).strip()
-        st.caption("請勿使用他人的 API Key。只要目前瀏覽器 session 仍在，開始另一段練習時會沿用你自己的 Key，不必重複貼上。")
 
         access_code = ""
         if settings.course_access_code:
             access_code = st.text_input("課程通行碼", type="password")
 
-        mode = st.radio(
-            "訓練模式",
-            options=list(MODE_LABELS),
-            format_func=lambda value: MODE_LABELS[value],
-        )
         duration_target_min = st.select_slider(
             "建議練習時間（不會強制中斷）",
             options=[5, 8, 10, 12, 15, 20],
@@ -558,13 +636,38 @@ if not session:
         experience_topic_id = "interpersonal"
         case_id = "college_peer_01"
         training_path = "full"
+        conversation_action = "new"
+        continuity_pin = ""
+
         if mode == "experience":
+            st.markdown("#### 跨日續談")
+            conversation_action = st.radio(
+                "這次要怎麼談？",
+                options=["new", "continue"],
+                format_func=lambda value: (
+                    "開始新的談話" if value == "new" else "繼續上次談話"
+                ),
+                horizontal=True,
+            )
+            continuity_pin = st.text_input(
+                "續談 PIN（6 位數）",
+                type="password",
+                max_chars=6,
+                help=(
+                    "第一次使用請自行設定 6 位數並記住；之後同一匿名代碼必須輸入相同 PIN 才能續談。"
+                    "後台只保存不可逆雜湊，不保存原始 PIN。"
+                ),
+            ).strip()
             experience_topic_id = st.selectbox(
                 "這次想體驗的主題",
                 options=list(EXPERIENCE_TOPICS),
                 format_func=lambda value: EXPERIENCE_TOPICS[value],
+                disabled=conversation_action == "continue",
             )
-            st.info("體驗模式中，AI 擔任示範助人者；演練結束後才會揭露使用過的技巧。")
+            if conversation_action == "continue":
+                st.info("系統會在送出後，用匿名學習者代碼＋PIN 找到最近一次已完成談話的摘要與最後幾輪，自動承接。")
+            else:
+                st.info("體驗模式中，AI 擔任示範助人者；本次結束後會自動建立供下次續談的去識別摘要。")
         else:
             options = case_options()
             case_id = st.selectbox(
@@ -590,6 +693,9 @@ if not session:
 
     if submitted:
         errors: list[str] = []
+        prior_memory: dict | None = None
+        continuity_pin_hash = ""
+
         if not PARTICIPANT_PATTERN.fullmatch(participant_id):
             errors.append("匿名代碼需為 3–32 個英文字母、數字、底線或連字號。")
         if settings.course_access_code and not hmac.compare_digest(
@@ -603,8 +709,31 @@ if not session:
         if settings.require_sheets and not store.enabled:
             errors.append("研究模式要求 Google Sheets 正常連線後才能開始。")
 
-        # 先把 Key 放進目前學生的 Streamlit session，再建立專屬 Gateway。
-        # Key 不會被加入 session record，也不會傳給 Google Sheets。
+        if mode == "experience" and PARTICIPANT_PATTERN.fullmatch(participant_id):
+            if not valid_pin(continuity_pin):
+                errors.append("體驗模式的續談 PIN 必須是 6 位數字。")
+            elif store.enabled:
+                try:
+                    latest = store.latest_continuity(participant_id)
+                except SheetsStoreError as exc:
+                    latest = None
+                    errors.append(str(exc))
+
+                if latest:
+                    if not pin_matches(participant_id, continuity_pin, str(latest.get("pin_hash", ""))):
+                        errors.append("續談 PIN 不正確。為保護前次談話內容，無法讀取或建立此匿名代碼的續談紀錄。")
+                    elif conversation_action == "continue":
+                        prior_memory = latest
+                        # 續談時沿用前次主題；若找不到對應標籤，再保留表單預設值。
+                        reverse_topics = {label: key for key, label in EXPERIENCE_TOPICS.items()}
+                        experience_topic_id = reverse_topics.get(
+                            str(latest.get("topic_label", "")), experience_topic_id
+                        )
+                elif conversation_action == "continue":
+                    errors.append("目前找不到這個匿名學習者代碼的已完成續談紀錄；請先選擇「開始新的談話」。")
+
+                continuity_pin_hash = pin_digest(participant_id, continuity_pin)
+
         if not errors:
             st.session_state.student_api_key = student_api_key
             gateway, gateway_error = build_student_gateway(settings)
@@ -614,7 +743,6 @@ if not session:
                 )
 
         if errors:
-            # 若連 Gateway 都無法建立，不保留這把 Key。
             if gateway is None:
                 st.session_state.student_api_key = ""
             for error in errors:
@@ -630,6 +758,9 @@ if not session:
                     experience_topic_id=experience_topic_id,
                     case_id=case_id,
                     training_path=training_path,
+                    conversation_action=conversation_action,
+                    continuity_pin_hash=continuity_pin_hash,
+                    prior_memory=prior_memory,
                 )
                 st.rerun()
             except SheetsStoreError as exc:
@@ -645,8 +776,17 @@ else:
     top_left.metric("模式", "體驗" if session["mode"] == "experience" else "實作")
     top_middle.metric("目前階段", STAGE_LABELS[session["current_stage"]])
     top_right.metric("已進行", f"{minutes}:{seconds:02d}")
-    top_fourth.metric("本學期第", f"{session.get('usage_number', 1)} 次")
-    st.caption(f"匿名代碼：{session['participant_id']}｜Session：{session['session_id'][:8]}")
+    if session["mode"] == "experience":
+        top_fourth.metric("同一談話第", f"{session.get('conversation_session_number', 1)} 次")
+    else:
+        top_fourth.metric("本學期第", f"{session.get('usage_number', 1)} 次")
+
+    caption = f"匿名代碼：{session['participant_id']}｜Session：{session['session_id'][:8]}"
+    if session["mode"] == "experience":
+        caption += f"｜Conversation：{session.get('conversation_id', '')[:8]}"
+        if session.get("conversation_action") == "continue":
+            caption += "｜續談"
+    st.caption(caption)
 
     if st.session_state.logging_error:
         st.error(
@@ -678,7 +818,7 @@ else:
             controls[0].empty()
 
         if controls[1].button("結束並查看回饋", type="primary", use_container_width=True):
-            with st.spinner("正在根據逐字稿產生形成性回饋……"):
+            with st.spinner("正在根據逐字稿產生形成性回饋並建立續談摘要……"):
                 finish_session(settings, store, gateway)
             st.rerun()
 
@@ -708,9 +848,12 @@ else:
         elif session.get("completion_status") == "safety_ended":
             st.info("本次教學模擬已依安全規則停止，不進行技巧評量。")
 
+        if session.get("mode") == "experience" and session.get("continuity_saved"):
+            st.success("已建立下次續談記憶。下次使用相同匿名學習者代碼與 6 位 PIN，即可選擇「繼續上次談話」。")
+
         transcript = format_transcript(st.session_state.messages, max_chars=100000)
         st.download_button(
-            "下載本次逐字稿",
+            "下載本次逐字稿（選用；續談不需要重新上傳）",
             data=transcript.encode("utf-8-sig"),
             file_name=f"helping_transcript_{session['session_id'][:8]}.txt",
             mime="text/plain",
