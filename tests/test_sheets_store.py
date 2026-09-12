@@ -66,6 +66,7 @@ def test_empty_default_sheet_is_reused_and_schema_created():
 
     assert set(store.spreadsheet.by_title) == set(SHEET_HEADERS)
     assert "ContinuityMemory" in store.spreadsheet.by_title
+    assert "StudentRoster" in store.spreadsheet.by_title
     for name, headers in SHEET_HEADERS.items():
         worksheet = store.spreadsheet.by_title[name]
         assert worksheet.rows[0] == headers
@@ -102,3 +103,19 @@ def test_latest_continuity_returns_latest_ready_or_fallback_row():
     assert latest is not None
     assert latest["summary_text"] == "最新"
     assert store.latest_continuity("P999") is None
+
+
+def test_student_by_email_is_case_insensitive():
+    store = object.__new__(SheetsStore)
+    store.read_all = lambda _sheet_name: [
+        {
+            "participant_id": "SABC123",
+            "school_email": "student@school.edu.tw",
+            "first_verified_at": "2026-09-12T10:00:00+08:00",
+        }
+    ]
+
+    row = store.student_by_email("STUDENT@SCHOOL.EDU.TW")
+    assert row is not None
+    assert row["participant_id"] == "SABC123"
+    assert store.student_by_email("other@school.edu.tw") is None
