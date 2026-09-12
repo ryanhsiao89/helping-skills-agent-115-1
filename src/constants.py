@@ -86,7 +86,7 @@ SHEET_HEADERS: dict[str, list[str]] = {
         "evaluator_temperature",
         "status",
     ],
-    # 跨日續談記憶。既有四張研究資料表完全不改欄位，避免舊資料 schema mismatch。
+    # 跨日續談記憶。pin_hash 為舊版相容欄位，新版 Email OTP 流程會留空。
     "ContinuityMemory": [
         "memory_id",
         "participant_id",
@@ -102,5 +102,11 @@ SHEET_HEADERS: dict[str, list[str]] = {
         "recent_context_json",
         "pin_hash",
         "memory_status",
+    ],
+    # 已通過學校 Email OTP 驗證的學生身分對照；不把 Email 重複寫入逐字稿與每一筆對話。
+    "StudentRoster": [
+        "participant_id",
+        "school_email",
+        "first_verified_at",
     ],
 }
