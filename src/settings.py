@@ -1,4 +1,8 @@
-"""從 Streamlit Secrets 載入設定，並維持可測試性。"""
+"""從 Streamlit Secrets 載入教師端系統設定，並維持可測試性。
+
+Gemini API Key 不由教師端 Secrets 提供；學生會在 app.py 的開始表單中
+自行輸入，並只暫存在該 Streamlit session 的 session_state。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ def _value(source: Mapping[str, Any], key: str, default: Any = None) -> Any:
     try:
         return source[key]
     except Exception:
-        # Streamlit 在完全沒有 secrets.toml 時拋出的不是 KeyError；
+        # Streamlit 在完全沒有 secrets.toml 時拋出的不一定是 KeyError；
         # 讓未設定的本機預覽仍能啟動並顯示設定提示。
         return default
 
@@ -28,6 +32,8 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    # 保留舊欄位以避免其他尚未更新的模組因 AttributeError 中斷；
+    # 新版 load_settings 永遠不從教師端 Secrets 載入 Gemini Key。
     gemini_api_keys: tuple[str, ...]
     model_name: str
     evaluator_model_name: str
@@ -49,7 +55,8 @@ class Settings:
 
     @property
     def gemini_configured(self) -> bool:
-        return bool(self.gemini_api_keys)
+        """舊版相容屬性；新版學生端不使用教師端 Gemini Key。"""
+        return False
 
     def service_account_info(self) -> dict[str, Any]:
         if not self.service_account_json:
@@ -61,14 +68,11 @@ class Settings:
 
 
 def load_settings(secrets: Mapping[str, Any]) -> Settings:
-    multi_keys = _value(secrets, "GEMINI_API_KEYS", []) or []
-    if isinstance(multi_keys, str):
-        multi_keys = [multi_keys]
-    single_key = str(_value(secrets, "GEMINI_API_KEY", "") or "").strip()
-    keys = [str(item).strip() for item in multi_keys if str(item).strip()]
-    if single_key and single_key not in keys:
-        keys.insert(0, single_key)
+    """載入教師端設定。
 
+    即使 Secrets 仍殘留舊版 GEMINI_API_KEY / GEMINI_API_KEYS，也刻意忽略，
+    避免學生流量誤用教師的 Gemini 配額。
+    """
     service_json = str(_value(secrets, "GOOGLE_SERVICE_ACCOUNT_JSON", "") or "").strip()
     if not service_json:
         nested = _value(secrets, "gcp_service_account", None)
@@ -76,7 +80,7 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
             service_json = json.dumps(dict(nested), ensure_ascii=False)
 
     return Settings(
-        gemini_api_keys=tuple(keys),
+        gemini_api_keys=(),
         model_name=str(_value(secrets, "MODEL_NAME", "gemini-3.8-flash")),
         evaluator_model_name=str(
             _value(
