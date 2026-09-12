@@ -1,0 +1,23 @@
+# Streamlit 與雲端憑證
+.streamlit/secrets.toml
+service-account*.json
+credentials*.json
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 匯出與暫存資料
+exports/
+*.log
