@@ -25,8 +25,9 @@ def test_practice_prompt_treats_parentheses_as_nonverbal_behavior():
         case=get_case("college_peer_01"),
     )
     assert "非語言" in prompt
-    assert "安靜等待他人發言" in prompt
+    assert "保持適度眼神接觸" in prompt
     assert "不得把括號內容誤認為助人者說出口的話" in prompt
+    assert "安靜等待他人發言" not in prompt
 
 
 def test_experience_prompt_treats_parentheses_as_nonverbal_behavior():
@@ -37,6 +38,8 @@ def test_experience_prompt_treats_parentheses_as_nonverbal_behavior():
     )
     assert "非語言" in prompt
     assert "不可過度解讀" in prompt
+    assert "眼神渙散" in prompt
+    assert "握緊拳頭" in prompt
 
 
 def test_transcript_keeps_recent_content_when_trimmed():
@@ -51,12 +54,13 @@ def test_transcript_keeps_recent_content_when_trimmed():
 
 def test_dialogue_turn_input_repeats_nonverbal_rule():
     prompt = dialogue_turn_input(
-        [{"speaker_role": "student_counselor", "content": "(安靜等待他人發言)"}],
+        [{"speaker_role": "student_client", "content": "(避免眼神接觸)"}],
         max_chars=1000,
     )
     assert "非語言行為" in prompt
     assert "不是角色實際說出口的話" in prompt
-    assert "(安靜等待他人發言)" in prompt
+    assert "(避免眼神接觸)" in prompt
+    assert "安靜等待他人發言" not in prompt
 
 
 def test_evaluator_does_not_count_nonverbal_as_verbal_technique():
