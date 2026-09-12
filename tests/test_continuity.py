@@ -1,15 +1,4 @@
-from src.continuity import build_memory_record, pin_digest, pin_matches, recent_context, valid_pin
-
-
-def test_pin_is_six_digits_and_never_stored_raw():
-    assert valid_pin("123456") is True
-    assert valid_pin("12345") is False
-    assert valid_pin("abcdef") is False
-
-    digest = pin_digest("P001", "123456")
-    assert digest != "123456"
-    assert pin_matches("P001", "123456", digest) is True
-    assert pin_matches("P001", "654321", digest) is False
+from src.continuity import build_memory_record, recent_context
 
 
 def test_recent_context_excludes_system_messages():
@@ -23,14 +12,13 @@ def test_recent_context_excludes_system_messages():
     assert all(item["speaker_role"] != "system" for item in context)
 
 
-def test_memory_record_contains_continuation_metadata_not_raw_pin():
+def test_memory_record_keeps_legacy_pin_column_empty():
     session = {
-        "participant_id": "P001",
+        "participant_id": "SABC123456789",
         "conversation_id": "conversation-1",
         "session_id": "session-2",
         "parent_session_id": "session-1",
         "conversation_session_number": 2,
-        "continuity_pin_hash": "hashed-pin",
         "experience_topic_label": "課業或研究壓力",
     }
     messages = [
@@ -50,5 +38,4 @@ def test_memory_record_contains_continuation_metadata_not_raw_pin():
     )
     assert record["parent_session_id"] == "session-1"
     assert record["session_number"] == 2
-    assert record["pin_hash"] == "hashed-pin"
-    assert "123456" not in str(record)
+    assert record["pin_hash"] == ""
