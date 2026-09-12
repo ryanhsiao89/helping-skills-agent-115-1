@@ -62,7 +62,6 @@ class Settings:
     smtp_host: str
     smtp_port: int
     school_email_domains: tuple[str, ...]
-    otp_test_emails: tuple[str, ...]
     otp_ttl_seconds: int
     otp_resend_seconds: int
     otp_max_attempts: int
@@ -78,11 +77,7 @@ class Settings:
 
     @property
     def otp_configured(self) -> bool:
-        return bool(
-            self.email_sender
-            and self.email_password
-            and (self.school_email_domains or self.otp_test_emails)
-        )
+        return bool(self.email_sender and self.email_password and self.school_email_domains)
 
     def service_account_info(self) -> dict[str, Any]:
         if not self.service_account_json:
@@ -139,11 +134,6 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         domains = _as_tuple(email_cfg.get("school_domains", ()))
     domains = tuple(item.lower().lstrip("@") for item in domains)
 
-    test_emails = _as_tuple(_value(secrets, "OTP_TEST_EMAILS", ()))
-    if not test_emails:
-        test_emails = _as_tuple(email_cfg.get("test_emails", ()))
-    test_emails = tuple(item.strip().lower() for item in test_emails if item.strip())
-
     return Settings(
         gemini_api_keys=(),
         model_name=str(_value(secrets, "MODEL_NAME", "gemini-3.8-flash")),
@@ -168,7 +158,6 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         smtp_host=smtp_host,
         smtp_port=smtp_port,
         school_email_domains=domains,
-        otp_test_emails=test_emails,
         otp_ttl_seconds=int(_value(secrets, "OTP_TTL_SECONDS", 600)),
         otp_resend_seconds=int(_value(secrets, "OTP_RESEND_SECONDS", 60)),
         otp_max_attempts=int(_value(secrets, "OTP_MAX_ATTEMPTS", 5)),
