@@ -6,6 +6,7 @@ sampling 參數 temperature / top_p / top_k；改用 thinking_level。
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -17,7 +18,7 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class GatewayError(RuntimeError):
-    """對外不暴露 API Key 或完整供應商錯誤訊息。"""
+    """對外只顯示已去識別的供應商錯誤診斷，不暴露 API Key。"""
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,40 @@ class StructuredResult:
     raw_text: str
     latency_ms: int
     key_slot: int
+
+
+def _safe_error_detail(exc: Exception | None) -> str:
+    """保留足以除錯的錯誤類型／狀態，同時遮蔽可能出現在訊息中的 API Key。"""
+    if exc is None:
+        return "unknown_error"
+
+    labels: list[str] = [type(exc).__name__]
+    for attr in ("status_code", "code", "status"):
+        value = getattr(exc, attr, None)
+        if value not in (None, ""):
+            label = f"{attr}={value}"
+            if label not in labels:
+                labels.append(label)
+
+    message = str(exc).replace("\r", " ").replace("\n", " ").strip()
+    # Google API keys commonly start with AIza; also redact URL/query/header forms defensively.
+    message = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[API_KEY_REDACTED]", message)
+    message = re.sub(
+        r"(?i)([?&](?:key|api_key)=)[^&\s]+",
+        r"\1[API_KEY_REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(x-goog-api-key\s*[:=]\s*)[^,;\s]+",
+        r"\1[API_KEY_REDACTED]",
+        message,
+    )
+    if len(message) > 700:
+        message = message[:700] + "…"
+
+    if message:
+        labels.append(message)
+    return " | ".join(labels)
 
 
 class GeminiGateway:
@@ -113,8 +148,9 @@ class GeminiGateway:
                 except Exception as exc:  # SDK 錯誤型別會隨版本擴充；統一重試/輪替 Key。
                     last_error = exc
 
+        detail = _safe_error_detail(last_error)
         raise GatewayError(
-            "Gemini API 呼叫失敗，請檢查 API Key、模型存取權、用量配額或稍後再試。"
+            "Gemini API 呼叫失敗。安全診斷：" + detail
         ) from last_error
 
     def generate_structured(
@@ -169,6 +205,7 @@ class GeminiGateway:
                 except Exception as exc:
                     last_error = exc
 
+        detail = _safe_error_detail(last_error)
         raise GatewayError(
-            "晤談後回饋產生失敗，原始逐字稿仍已保留；請檢查模型存取權或配額後重試。"
+            "晤談後回饋產生失敗。安全診斷：" + detail
         ) from last_error
