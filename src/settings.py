@@ -1,7 +1,7 @@
 """從 Streamlit Secrets 載入教師端系統設定，並維持可測試性。
 
-Gemini API Key 不由教師端 Secrets 提供；學生會在 app.py 的開始表單中
-自行輸入，並只暫存在該 Streamlit session 的 session_state。
+Gemini API Key 不由教師端 Secrets 提供；學生會在 app.py 中自行輸入，
+並只暫存在該 Streamlit session 的 session_state。
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ def _value(source: Mapping[str, Any], key: str, default: Any = None) -> Any:
     try:
         return source[key]
     except Exception:
-        # Streamlit 在完全沒有 secrets.toml 時拋出的不一定是 KeyError；
-        # 讓未設定的本機預覽仍能啟動並顯示設定提示。
         return default
 
 
@@ -28,6 +26,17 @@ def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    text = str(value).strip()
+    if not text:
+        return ()
+    return tuple(item.strip() for item in text.split(",") if item.strip())
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,14 @@ class Settings:
     require_sheets: bool
     max_history_chars: int
     max_user_input_chars: int
+    email_sender: str
+    email_password: str
+    smtp_host: str
+    smtp_port: int
+    school_email_domains: tuple[str, ...]
+    otp_ttl_seconds: int
+    otp_resend_seconds: int
+    otp_max_attempts: int
 
     @property
     def sheets_configured(self) -> bool:
@@ -57,6 +74,10 @@ class Settings:
     def gemini_configured(self) -> bool:
         """舊版相容屬性；新版學生端不使用教師端 Gemini Key。"""
         return False
+
+    @property
+    def otp_configured(self) -> bool:
+        return bool(self.email_sender and self.email_password and self.school_email_domains)
 
     def service_account_info(self) -> dict[str, Any]:
         if not self.service_account_json:
@@ -79,6 +100,31 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         if nested:
             service_json = json.dumps(dict(nested), ensure_ascii=False)
 
+    email_cfg = _value(secrets, "email", {}) or {}
+    try:
+        email_cfg = dict(email_cfg)
+    except Exception:
+        email_cfg = {}
+
+    email_sender = str(
+        email_cfg.get("sender", _value(secrets, "SENDER_EMAIL", "")) or ""
+    ).strip()
+    email_password = str(
+        email_cfg.get("password", _value(secrets, "SENDER_PASSWORD", "")) or ""
+    ).strip()
+    smtp_host = str(
+        email_cfg.get("smtp_host", _value(secrets, "SMTP_HOST", "smtp.gmail.com"))
+        or "smtp.gmail.com"
+    ).strip()
+    smtp_port = int(
+        email_cfg.get("smtp_port", _value(secrets, "SMTP_PORT", 465)) or 465
+    )
+
+    domains = _as_tuple(_value(secrets, "SCHOOL_EMAIL_DOMAINS", ()))
+    if not domains:
+        domains = _as_tuple(email_cfg.get("school_domains", ()))
+    domains = tuple(item.lower().lstrip("@") for item in domains)
+
     return Settings(
         gemini_api_keys=(),
         model_name=str(_value(secrets, "MODEL_NAME", "gemini-3.8-flash")),
@@ -98,4 +144,12 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         require_sheets=_as_bool(_value(secrets, "REQUIRE_SHEETS", True), True),
         max_history_chars=int(_value(secrets, "MAX_HISTORY_CHARS", 12000)),
         max_user_input_chars=int(_value(secrets, "MAX_USER_INPUT_CHARS", 800)),
+        email_sender=email_sender,
+        email_password=email_password,
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        school_email_domains=domains,
+        otp_ttl_seconds=int(_value(secrets, "OTP_TTL_SECONDS", 600)),
+        otp_resend_seconds=int(_value(secrets, "OTP_RESEND_SECONDS", 60)),
+        otp_max_attempts=int(_value(secrets, "OTP_MAX_ATTEMPTS", 5)),
     )
