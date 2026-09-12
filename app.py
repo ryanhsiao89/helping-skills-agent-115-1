@@ -37,6 +37,7 @@ from src.settings import Settings, load_settings
 from src.sheets_store import NullStore, SheetsStore, SheetsStoreError
 
 TAIPEI = ZoneInfo("Asia/Taipei")
+OWNER_TEST_EMAIL = "ryanhsiao89@gmail.com"
 
 st.set_page_config(
     page_title="助人技巧訓練 Agent",
@@ -722,7 +723,11 @@ if not st.session_state.auth_verified:
         ).strip()
         if st.button("寄送 6 位數驗證碼", type="primary", use_container_width=True):
             normalized = normalize_email(school_email)
-            if not email_allowed(normalized, settings.school_email_domains):
+            if not email_allowed(
+                normalized,
+                settings.school_email_domains,
+                allowed_emails=(OWNER_TEST_EMAIL,),
+            ):
                 st.error(f"請使用指定的學校 Email（{allowed_text}）。")
             else:
                 try:
@@ -1016,6 +1021,10 @@ else:
                 finish_session(settings, store, gateway)
             st.rerun()
 
+        st.caption(
+            "💡 非語言訊息也可以輸入：請用半形 ( ) 或全形（ ）表示，例如「(安靜等待他人發言)」、"
+            "「（點頭）」或「（沉默片刻）」。括號內會被視為非語言行為／歷程提示，不是說出口的話。"
+        )
         input_disabled = bool(st.session_state.logging_error and settings.require_sheets)
         user_text = st.chat_input(
             "輸入這一輪想說的話……",
