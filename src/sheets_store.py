@@ -1,6 +1,6 @@
 """Google Sheets 持久化層。
 
-使用一份試算表中的 Sessions、ChatLogs、SkillEvents、Assessments、ContinuityMemory 工作表。
+使用一份試算表中的 Sessions、ChatLogs、SkillEvents、Assessments、ContinuityMemory、StudentRoster 工作表。
 所有寫入採 RAW，避免學生輸入被 Google Sheets 解讀為公式。
 """
 
@@ -69,6 +69,22 @@ class NullStore:
 
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
         return None
+
+    def student_by_email(self, school_email: str) -> dict[str, Any] | None:
+        return None
+
+    def ensure_student(
+        self,
+        *,
+        school_email: str,
+        participant_id: str,
+        verified_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "participant_id": participant_id,
+            "school_email": school_email,
+            "first_verified_at": verified_at,
+        }
 
 
 class SheetsStore:
@@ -158,7 +174,7 @@ class SheetsStore:
         return UsageSummary(started=len(participant_rows), completed=completed)
 
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
-        """取得同一匿名學習者最新一筆已保存的跨次續談記憶。"""
+        """取得同一已驗證學生最新一筆已保存的跨次續談記憶。"""
         participant_id = participant_id.strip()
         if not participant_id:
             return None
@@ -180,6 +196,36 @@ class SheetsStore:
             return (str(row.get("updated_at", "")), number)
 
         return dict(max(rows, key=sort_key))
+
+    def student_by_email(self, school_email: str) -> dict[str, Any] | None:
+        """以已驗證學校 Email 找到穩定的 participant_id。"""
+        target = str(school_email or "").strip().lower()
+        if not target:
+            return None
+        rows = self.read_all("StudentRoster")
+        for row in rows:
+            if str(row.get("school_email", "")).strip().lower() == target:
+                return dict(row)
+        return None
+
+    def ensure_student(
+        self,
+        *,
+        school_email: str,
+        participant_id: str,
+        verified_at: str,
+    ) -> dict[str, Any]:
+        """第一次驗證時建立 StudentRoster；之後沿用既有 participant_id。"""
+        existing = self.student_by_email(school_email)
+        if existing:
+            return existing
+        record = {
+            "participant_id": participant_id,
+            "school_email": str(school_email).strip().lower(),
+            "first_verified_at": verified_at,
+        }
+        self.append_record("StudentRoster", record)
+        return record
 
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         try:
