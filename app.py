@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
-import re
+import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,7 +12,18 @@ import streamlit as st
 from src.assessment_models import AssessmentResult
 from src.cases import EXPERIENCE_TOPICS, PRACTICE_CASES, case_options, get_case
 from src.constants import AGENT_TYPE, MODE_LABELS, STAGE_LABELS, STAGES
-from src.continuity import build_memory_record, pin_digest, pin_matches, valid_pin
+from src.continuity import build_memory_record
+from src.email_otp import (
+    email_allowed,
+    generate_otp,
+    mask_email,
+    new_otp_nonce,
+    normalize_email,
+    otp_digest,
+    otp_matches,
+    participant_id_for_email,
+    send_otp_email,
+)
 from src.gemini_gateway import GatewayError, GeminiGateway
 from src.prompts import (
     dialogue_system_prompt,
@@ -26,7 +37,6 @@ from src.settings import Settings, load_settings
 from src.sheets_store import NullStore, SheetsStore, SheetsStoreError
 
 TAIPEI = ZoneInfo("Asia/Taipei")
-PARTICIPANT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
 st.set_page_config(
     page_title="助人技巧訓練 Agent",
@@ -52,9 +62,20 @@ def init_state() -> None:
         "assessment_error": "",
         "logging_error": "",
         "admin_ok": False,
-        # 僅保存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
+        # Gemini Key 僅存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
         "student_api_key": "",
         "start_mode": "experience",
+        # 學校 Email OTP 登入狀態。
+        "auth_verified": False,
+        "verified_email": "",
+        "verified_participant_id": "",
+        "otp_sent": False,
+        "pending_email": "",
+        "otp_code_digest": "",
+        "otp_nonce": "",
+        "otp_expires_at": 0.0,
+        "otp_last_sent_at": 0.0,
+        "otp_attempts": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -92,6 +113,77 @@ def build_student_gateway(settings: Settings) -> tuple[GeminiGateway | None, str
         return GeminiGateway(api_keys=(api_key,), model_name=settings.model_name), ""
     except ValueError as exc:
         return None, str(exc)
+
+
+def clear_otp_challenge(*, keep_last_sent: bool = False) -> None:
+    for key, value in {
+        "otp_sent": False,
+        "pending_email": "",
+        "otp_code_digest": "",
+        "otp_nonce": "",
+        "otp_expires_at": 0.0,
+        "otp_attempts": 0,
+    }.items():
+        st.session_state[key] = value
+    if not keep_last_sent:
+        st.session_state.otp_last_sent_at = 0.0
+
+
+def issue_login_otp(settings: Settings, school_email: str) -> None:
+    email = normalize_email(school_email)
+    code = generate_otp()
+    nonce = new_otp_nonce()
+    send_otp_email(
+        receiver_email=email,
+        otp_code=code,
+        sender_email=settings.email_sender,
+        sender_password=settings.email_password,
+        smtp_host=settings.smtp_host,
+        smtp_port=settings.smtp_port,
+    )
+    sent_at = time.time()
+    st.session_state.pending_email = email
+    st.session_state.otp_nonce = nonce
+    st.session_state.otp_code_digest = otp_digest(email, code, nonce)
+    st.session_state.otp_expires_at = sent_at + settings.otp_ttl_seconds
+    st.session_state.otp_last_sent_at = sent_at
+    st.session_state.otp_attempts = 0
+    st.session_state.otp_sent = True
+
+
+def complete_email_login(store, school_email: str) -> None:
+    email = normalize_email(school_email)
+    participant_id = participant_id_for_email(email)
+    row = store.ensure_student(
+        school_email=email,
+        participant_id=participant_id,
+        verified_at=now_iso(),
+    )
+    st.session_state.auth_verified = True
+    st.session_state.verified_email = email
+    st.session_state.verified_participant_id = str(
+        row.get("participant_id", participant_id) or participant_id
+    ).strip()
+    clear_otp_challenge(keep_last_sent=True)
+
+
+def logout_student() -> None:
+    for key in (
+        "active_session",
+        "messages",
+        "turn_index",
+        "assessment",
+        "assessment_error",
+        "logging_error",
+        "student_api_key",
+        "verified_email",
+        "verified_participant_id",
+    ):
+        if key in st.session_state:
+            del st.session_state[key]
+    st.session_state.auth_verified = False
+    clear_otp_challenge()
+    init_state()
 
 
 def log_message(
@@ -204,7 +296,7 @@ def start_session(
     case_id: str,
     training_path: str,
     conversation_action: str = "new",
-    continuity_pin_hash: str = "",
+    retain_for_continuity: bool = False,
     prior_memory: dict | None = None,
 ) -> None:
     usage = store.usage_summary(participant_id)
@@ -253,8 +345,8 @@ def start_session(
         "conversation_id": conversation_id,
         "parent_session_id": parent_session_id,
         "conversation_session_number": conversation_session_number,
-        "continuity_pin_hash": continuity_pin_hash if mode == "experience" else "",
-        # 只存在本次 Streamlit session；傳給模型時 prompts.py 會過濾掉 PIN hash/IDs。
+        "retain_for_continuity": bool(retain_for_continuity) if mode == "experience" else False,
+        # 只存在本次 Streamlit session；傳給模型時 prompts.py 只會帶入去識別的續談摘要。
         "continuity_memory": prior_memory if mode == "experience" and conversation_action == "continue" else None,
         "continuity_saved": False,
     }
@@ -278,7 +370,7 @@ def save_continuity_memory(
     updated_at: str,
     status: str,
 ) -> None:
-    if session.get("mode") != "experience" or not session.get("continuity_pin_hash"):
+    if session.get("mode") != "experience" or not session.get("retain_for_continuity"):
         return
     record = build_memory_record(
         session=session,
@@ -392,8 +484,8 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
             except SheetsStoreError:
                 pass
 
-    # 即使形成性評量失敗，體驗模式仍保存「最後幾輪」fallback；未啟用續談時 save_continuity_memory 會直接略過。
-    if session.get("mode") == "experience":
+    # 只有學生主動選擇保留／續談時才保存跨日記憶。
+    if session.get("mode") == "experience" and session.get("retain_for_continuity"):
         try:
             save_continuity_memory(
                 store=store,
@@ -514,7 +606,7 @@ def handle_user_turn(
 
 
 def reset_for_new_session() -> None:
-    # 清除上一段練習資料，但保留學生 API Key；跨日重新開瀏覽器時仍需重新貼 Key。
+    # 清除上一段練習資料，但保留已驗證學校 Email 與學生 API Key。
     for key in (
         "active_session",
         "messages",
@@ -572,29 +664,142 @@ st.warning(
 
 with st.sidebar:
     st.header("系統狀態")
+    if st.session_state.auth_verified:
+        st.success(f"身分：已驗證 {mask_email(st.session_state.verified_email)}")
+    else:
+        st.info("身分：請以學校 Email 驗證")
+
     if gateway is not None:
         st.success(f"Gemini：已使用學生 API Key（{settings.model_name}）")
     elif gateway_error:
         st.error(f"Gemini API Key 設定錯誤：{gateway_error}")
     else:
         st.info("Gemini：請由學生輸入自己的 API Key")
+
     if store.enabled:
         st.success("Google Sheets：已連線")
-        st.caption("續談記憶：僅在學生選擇保留或續談時啟用，並以匿名學習者代碼＋6 位 PIN 驗證")
+        st.caption("續談記憶：以已驗證學校 Email 對應的學習者代碼讀取")
     elif settings.require_sheets:
         st.error("Google Sheets：尚未連線")
     else:
         st.info("Google Sheets：本機預覽模式")
     if store_error:
         st.caption(store_error)
+
+    if st.session_state.auth_verified and not st.session_state.get("active_session"):
+        if st.button("切換學校帳號", use_container_width=True):
+            logout_student()
+            st.rerun()
+
     st.divider()
     st.caption(f"Prompt：{settings.prompt_version}")
     st.caption(f"Rubric：{settings.rubric_version}")
+
+# ---------------------------------------------------------
+# 學校 Email OTP 驗證：所有練習皆先驗證，OTP 不落地保存。
+# ---------------------------------------------------------
+if not st.session_state.auth_verified:
+    st.subheader("學校 Email 身分驗證")
+
+    if not settings.otp_configured:
+        st.error(
+            "尚未完成 Email OTP 設定。請教師在 Streamlit Secrets 設定 [email] sender、password，"
+            "以及 SCHOOL_EMAIL_DOMAINS。"
+        )
+        st.stop()
+
+    if settings.require_sheets and not store.enabled:
+        st.error("研究模式要求 Google Sheets 正常連線後才能進行身分驗證。")
+        st.stop()
+
+    allowed_text = "、".join(f"@{domain}" for domain in settings.school_email_domains)
+
+    if not st.session_state.otp_sent:
+        st.write(f"請輸入你的學校 Email。系統只接受：{allowed_text}")
+        school_email = st.text_input(
+            "學校 Email",
+            placeholder="例如 student@school.edu.tw",
+        ).strip()
+        if st.button("寄送 6 位數驗證碼", type="primary", use_container_width=True):
+            normalized = normalize_email(school_email)
+            if not email_allowed(normalized, settings.school_email_domains):
+                st.error(f"請使用指定的學校 Email（{allowed_text}）。")
+            else:
+                try:
+                    with st.spinner("正在寄送驗證碼……"):
+                        issue_login_otp(settings, normalized)
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(str(exc))
+    else:
+        email = st.session_state.pending_email
+        st.success(f"驗證碼已寄至：{mask_email(email)}")
+        st.caption(
+            f"驗證碼 {max(1, settings.otp_ttl_seconds // 60)} 分鐘內有效；"
+            f"最多可輸錯 {settings.otp_max_attempts} 次。"
+        )
+        otp_value = st.text_input("6 位數驗證碼", max_chars=6, type="password").strip()
+        verify_col, resend_col, change_col = st.columns(3)
+
+        if verify_col.button("確認登入", type="primary", use_container_width=True):
+            current_time = time.time()
+            if current_time > float(st.session_state.otp_expires_at or 0):
+                clear_otp_challenge(keep_last_sent=True)
+                st.error("驗證碼已過期，請重新寄送。")
+            elif st.session_state.otp_attempts >= settings.otp_max_attempts:
+                clear_otp_challenge(keep_last_sent=True)
+                st.error("驗證碼錯誤次數已達上限，請重新寄送。")
+            elif otp_matches(
+                email,
+                otp_value,
+                st.session_state.otp_nonce,
+                st.session_state.otp_code_digest,
+            ):
+                try:
+                    complete_email_login(store, email)
+                    st.rerun()
+                except SheetsStoreError as exc:
+                    st.error(str(exc))
+            else:
+                st.session_state.otp_attempts += 1
+                remaining = max(0, settings.otp_max_attempts - st.session_state.otp_attempts)
+                st.error(f"驗證碼不正確，還可嘗試 {remaining} 次。")
+
+        cooldown_remaining = max(
+            0,
+            int(
+                settings.otp_resend_seconds
+                - (time.time() - float(st.session_state.otp_last_sent_at or 0))
+            ),
+        )
+        if resend_col.button(
+            "重新寄送",
+            use_container_width=True,
+            disabled=cooldown_remaining > 0,
+        ):
+            try:
+                with st.spinner("正在重新寄送驗證碼……"):
+                    issue_login_otp(settings, email)
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc))
+        if cooldown_remaining > 0:
+            resend_col.caption(f"{cooldown_remaining} 秒後可重送")
+
+        if change_col.button("更換 Email", use_container_width=True):
+            clear_otp_challenge()
+            st.rerun()
+
+    st.stop()
 
 session = st.session_state.active_session
 
 if not session:
     st.subheader("開始一段練習")
+    st.success(
+        f"已驗證：{mask_email(st.session_state.verified_email)}｜"
+        f"學習者代碼：{st.session_state.verified_participant_id}"
+    )
 
     # 放在 form 外，使切換模式／續談選項時能立即更新相應欄位。
     mode = st.radio(
@@ -628,12 +833,6 @@ if not session:
             retain_for_continuity = True
 
     with st.form("start_session_form"):
-        participant_id = st.text_input(
-            "匿名學習者代碼",
-            placeholder="例如 P001",
-            help="請使用教師分配的匿名代碼，不要輸入姓名或 Email。",
-        ).strip()
-
         student_api_key = st.text_input(
             "Gemini API Key",
             type="password",
@@ -648,20 +847,6 @@ if not session:
         access_code = ""
         if settings.course_access_code:
             access_code = st.text_input("課程通行碼", type="password")
-
-        continuity_pin = ""
-        if mode == "experience" and retain_for_continuity:
-            continuity_pin = st.text_input(
-                "續談 PIN（6 位數）",
-                type="password",
-                max_chars=6,
-                help=(
-                    "只有啟用續談功能時需要 PIN。第一次保留談話時自行設定 6 位數並記住；"
-                    "之後同一匿名代碼必須輸入相同 PIN 才能續談。後台只保存不可逆雜湊，不保存原始 PIN。"
-                ),
-            ).strip()
-        elif mode == "experience":
-            st.caption("本次不保留續談記憶，因此不需要設定 PIN。")
 
         duration_target_min = st.select_slider(
             "建議練習時間（不會強制中斷）",
@@ -681,7 +866,7 @@ if not session:
                 disabled=conversation_action == "continue",
             )
             if conversation_action == "continue":
-                st.info("系統會在送出後，用匿名學習者代碼＋PIN 找到最近一次已完成談話的摘要與最後幾輪，自動承接。")
+                st.info("系統會依你已驗證的學校 Email 身分找到最近一次已保留的談話摘要與最後幾輪，自動承接。")
             elif retain_for_continuity:
                 st.info("體驗模式中，AI 擔任示範助人者；本次結束後會建立供下次續談的去識別摘要。")
             else:
@@ -712,10 +897,8 @@ if not session:
     if submitted:
         errors: list[str] = []
         prior_memory: dict | None = None
-        continuity_pin_hash = ""
+        participant_id = st.session_state.verified_participant_id
 
-        if not PARTICIPANT_PATTERN.fullmatch(participant_id):
-            errors.append("匿名代碼需為 3–32 個英文字母、數字、底線或連字號。")
         if settings.course_access_code and not hmac.compare_digest(
             access_code, settings.course_access_code
         ):
@@ -727,31 +910,20 @@ if not session:
         if settings.require_sheets and not store.enabled:
             errors.append("研究模式要求 Google Sheets 正常連線後才能開始。")
 
-        continuity_requested = mode == "experience" and retain_for_continuity
-        if continuity_requested and PARTICIPANT_PATTERN.fullmatch(participant_id):
-            if not valid_pin(continuity_pin):
-                errors.append("啟用續談功能時，續談 PIN 必須是 6 位數字。")
-            elif store.enabled:
-                try:
-                    latest = store.latest_continuity(participant_id)
-                except SheetsStoreError as exc:
-                    latest = None
-                    errors.append(str(exc))
+        if mode == "experience" and conversation_action == "continue" and store.enabled:
+            try:
+                prior_memory = store.latest_continuity(participant_id)
+            except SheetsStoreError as exc:
+                prior_memory = None
+                errors.append(str(exc))
 
-                if latest:
-                    if not pin_matches(participant_id, continuity_pin, str(latest.get("pin_hash", ""))):
-                        errors.append("續談 PIN 不正確。為保護前次談話內容，無法讀取或建立此匿名代碼的續談紀錄。")
-                    elif conversation_action == "continue":
-                        prior_memory = latest
-                        # 續談時沿用前次主題；若找不到對應標籤，再保留表單預設值。
-                        reverse_topics = {label: key for key, label in EXPERIENCE_TOPICS.items()}
-                        experience_topic_id = reverse_topics.get(
-                            str(latest.get("topic_label", "")), experience_topic_id
-                        )
-                elif conversation_action == "continue":
-                    errors.append("目前找不到這個匿名學習者代碼的已完成續談紀錄；請先選擇「開始新的談話」。")
-
-                continuity_pin_hash = pin_digest(participant_id, continuity_pin)
+            if prior_memory:
+                reverse_topics = {label: key for key, label in EXPERIENCE_TOPICS.items()}
+                experience_topic_id = reverse_topics.get(
+                    str(prior_memory.get("topic_label", "")), experience_topic_id
+                )
+            else:
+                errors.append("目前找不到你的已保留續談紀錄；請先選擇「開始新的談話」，並勾選保留供下次續談。")
 
         if not errors:
             st.session_state.student_api_key = student_api_key
@@ -778,7 +950,7 @@ if not session:
                     case_id=case_id,
                     training_path=training_path,
                     conversation_action=conversation_action,
-                    continuity_pin_hash=continuity_pin_hash,
+                    retain_for_continuity=retain_for_continuity,
                     prior_memory=prior_memory,
                 )
                 st.rerun()
@@ -800,7 +972,7 @@ else:
     else:
         top_fourth.metric("本學期第", f"{session.get('usage_number', 1)} 次")
 
-    caption = f"匿名代碼：{session['participant_id']}｜Session：{session['session_id'][:8]}"
+    caption = f"學習者代碼：{session['participant_id']}｜Session：{session['session_id'][:8]}"
     if session["mode"] == "experience":
         caption += f"｜Conversation：{session.get('conversation_id', '')[:8]}"
         if session.get("conversation_action") == "continue":
@@ -838,7 +1010,7 @@ else:
 
         if controls[1].button("結束並查看回饋", type="primary", use_container_width=True):
             spinner_text = "正在根據逐字稿產生形成性回饋……"
-            if session.get("mode") == "experience" and session.get("continuity_pin_hash"):
+            if session.get("mode") == "experience" and session.get("retain_for_continuity"):
                 spinner_text = "正在根據逐字稿產生形成性回饋並建立續談摘要……"
             with st.spinner(spinner_text):
                 finish_session(settings, store, gateway)
@@ -871,11 +1043,12 @@ else:
             st.info("本次教學模擬已依安全規則停止，不進行技巧評量。")
 
         if session.get("mode") == "experience" and session.get("continuity_saved"):
-            st.success("已建立下次續談記憶。下次使用相同匿名學習者代碼與 6 位 PIN，即可選擇「繼續上次談話」。")
+            st.success("已建立下次續談記憶。下次用相同學校 Email 完成 OTP 驗證後，即可選擇「繼續上次談話」。")
 
+        # 保留學生自主下載逐字稿，供課後重新閱讀、自我反思與學習；續談本身不需要重新上傳。
         transcript = format_transcript(st.session_state.messages, max_chars=100000)
         st.download_button(
-            "下載本次逐字稿（選用；續談不需要重新上傳）",
+            "下載本次逐字稿（選用；可供課後自我反思）",
             data=transcript.encode("utf-8-sig"),
             file_name=f"helping_transcript_{session['session_id'][:8]}.txt",
             mime="text/plain",
