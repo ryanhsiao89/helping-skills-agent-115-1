@@ -1022,8 +1022,9 @@ else:
             st.rerun()
 
         st.caption(
-            "💡 非語言訊息也可以輸入：請用半形 ( ) 或全形（ ）表示，例如「(安靜等待他人發言)」、"
-            "「（點頭）」或「（沉默片刻）」。括號內會被視為非語言行為／歷程提示，不是說出口的話。"
+            "💡 非語言訊息也可以輸入：請用半形 ( ) 或全形（ ）表示，例如「(眼神渙散)」、"
+            "「(避免眼神接觸)」、「(握緊拳頭)」、「(面帶微笑)」或「(身體僵硬)」。"
+            "括號內會被視為非語言行為／歷程提示，不是說出口的話。"
         )
         input_disabled = bool(st.session_state.logging_error and settings.require_sheets)
         user_text = st.chat_input(
