@@ -10,6 +10,7 @@ import hmac
 import re
 import secrets
 import smtplib
+import socket
 from email.mime.text import MIMEText
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -83,12 +84,15 @@ def send_otp_email(
     smtp_host: str = "smtp.gmail.com",
     smtp_port: int = 465,
 ) -> None:
-    """以 Gmail/SMTP SSL 寄送 OTP；失敗時讓呼叫端顯示去敏感的錯誤。"""
+    """以 Gmail/SMTP SSL 寄送 OTP；錯誤訊息分類但不暴露密碼。"""
     sender = normalize_email(sender_email)
     receiver = normalize_email(receiver_email)
     password = str(sender_password or "").replace(" ", "").strip()
     if not sender or not password:
-        raise RuntimeError("寄件信箱尚未設定。請在 Streamlit Secrets 設定 [email] sender 與 password。")
+        raise RuntimeError(
+            "寄件信箱尚未設定。請確認 Streamlit Secrets 的 [email] 區塊；"
+            "新版 sender/password 與舊版 sender_email/app_password 都支援。"
+        )
 
     msg = MIMEText(
         "同學您好：\n\n"
@@ -106,5 +110,16 @@ def send_otp_email(
         with smtplib.SMTP_SSL(smtp_host, int(smtp_port), timeout=20) as server:
             server.login(sender, password)
             server.send_message(msg)
-    except Exception as exc:
-        raise RuntimeError("驗證信寄送失敗，請確認寄件 Gmail、App Password 與網路設定。") from exc
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError(
+            "Gmail 驗證失敗：請確認寄件帳號與 Google App Password 是否正確，"
+            "且該帳號允許使用 App Password。"
+        ) from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        raise RuntimeError("收件信箱被郵件伺服器拒絕，請確認學校 Email 是否可正常收信。") from exc
+    except (smtplib.SMTPConnectError, socket.timeout, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"無法連線寄信伺服器 {smtp_host}:{smtp_port}；請稍後重試或檢查 SMTP 設定。"
+        ) from exc
+    except smtplib.SMTPException as exc:
+        raise RuntimeError("Gmail SMTP 寄信失敗；請檢查寄件帳號、App Password 與 SMTP 設定。") from exc
