@@ -1,4 +1,4 @@
-"""對話生成與晤談後評量提示詞。"""
+"""對話生成、跨次續談與晤談後評量提示詞。"""
 
 from __future__ import annotations
 
@@ -51,6 +51,49 @@ def format_transcript(messages: Iterable[dict], max_chars: int = 12000) -> str:
     return prefix + "\n".join(selected)
 
 
+def format_continuity_context(memory: dict | None) -> str:
+    """只把續談需要的去識別欄位送進模型，不包含 PIN hash、IDs 或其他後台資訊。"""
+    if not memory:
+        return ""
+
+    unresolved = memory.get("unresolved_points_json", [])
+    recent = memory.get("recent_context_json", [])
+    if isinstance(unresolved, str):
+        try:
+            unresolved = json.loads(unresolved)
+        except json.JSONDecodeError:
+            unresolved = [unresolved] if unresolved.strip() else []
+    if isinstance(recent, str):
+        try:
+            recent = json.loads(recent)
+        except json.JSONDecodeError:
+            recent = []
+
+    recent_lines: list[str] = []
+    for item in recent if isinstance(recent, list) else []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("speaker_role", "")
+        content = " ".join(str(item.get("content", "")).split())
+        if content:
+            recent_lines.append(f"{role}：{content}")
+
+    parts = [
+        "【前次續談記憶】",
+        "以下內容來自同一匿名學習者前次已完成的教學談話紀錄，只能作為續談脈絡。",
+        f"主題：{memory.get('topic_label', '')}",
+        f"前次摘要：{memory.get('summary_text', '')}",
+    ]
+    if unresolved:
+        parts.append("尚未談完：" + "；".join(str(item) for item in unresolved if str(item).strip()))
+    if recent_lines:
+        parts.append("前次最後幾輪：\n" + "\n".join(recent_lines))
+    parts.append(
+        "續談規則：自然承接前次已保存內容即可；不要假裝記得未保存的細節，不要新增前次未出現的事件。"
+    )
+    return "\n".join(parts)
+
+
 def dialogue_system_prompt(
     *,
     mode: str,
@@ -67,7 +110,7 @@ def dialogue_system_prompt(
 2. 模擬進行中絕不顯示技巧名稱、評分、教學解析或「你應該怎麼說」；解析只在演練結束後由另一個評量呼叫產生。
 3. 不診斷、不代替真人專業協助、不鼓勵依賴 AI。避免索取姓名、電話、地址、學校、機構或其他可識別資料。
 4. 每次回應以 1 至 4 句為原則，語氣自然，不長篇說教；一次最多提出一個主要問題。
-5. 僅回覆當前對話，不替使用者杜撰經歷，不聲稱看見逐字稿中沒有的事。
+5. 僅回覆當前對話與程式提供的前次續談記憶，不替使用者杜撰經歷，不聲稱看見未提供的內容。
 """.strip()
 
     if mode == "experience":
@@ -79,6 +122,7 @@ def dialogue_system_prompt(
 目標是讓學生自然體驗適當的傾聽、同理、情感反映、重述／澄清與摘要；隨歷程需要再使用洞察或行動技巧。
 先建立理解與安全感，不要急著建議或解決。回應需貼近學生剛說的內容，讓技巧融入談話，不可像教科書示範。
 若學生只說很短，可用一個開放邀請；若已說出情緒，優先反映情緒與意義，再決定是否提問。
+若提供了前次續談記憶，可自然承接並詢問近況或變化，不需要要求學生重新敘述全部背景。
 不要主動把學生帶入創傷或高風險素材。若系統另行判定為即時安全風險，角色扮演會由程式停止。
 """.strip()
         )
@@ -110,10 +154,16 @@ def dialogue_system_prompt(
     )
 
 
-def dialogue_turn_input(messages: list[dict], max_chars: int) -> str:
+def dialogue_turn_input(
+    messages: list[dict],
+    max_chars: int,
+    continuity_memory: dict | None = None,
+) -> str:
     transcript = format_transcript(messages, max_chars=max_chars)
+    continuity = format_continuity_context(continuity_memory)
+    continuity_block = f"{continuity}\n\n" if continuity else ""
     return f"""
-以下是截至目前的教學模擬逐字稿。請只生成角色在下一輪會說的話，不加角色標籤、說明或技巧名稱。
+{continuity_block}以下是截至目前的教學模擬逐字稿。請只生成角色在下一輪會說的話，不加角色標籤、說明或技巧名稱。
 
 {transcript}
 """.strip()
@@ -135,7 +185,9 @@ def evaluator_system_prompt() -> str:
 4. 對話後效果只能描述下一輪可觀察反應，例如增加敘說、表達情緒、澄清或退縮；不可宣稱已治癒、真正改變或推論未說出的內在狀態。
 5. 區分技巧出現次數與品質。晤談很短或沒有證據時，直接寫明限制，不可用一般性稱讚補足。
 6. 不做診斷、不給總成績，不把 AI 回饋描述成標準化測驗結果。
-7. 全部使用繁體中文，輸出必須符合指定 JSON Schema。
+7. 若 mode=experience，continuity 必須依本次逐字稿產生去識別續談摘要：只保留主要議題、重要已述背景、尚未談完重點與下一次自然開場，不得加入姓名、電話、地址、學校、機構或逐字稿未出現的事實。next_opening 要像自然續談開場，不要提到資料庫、摘要或記憶系統。
+8. 若 mode=practice，continuity 各欄位留空即可。
+9. 全部使用繁體中文，輸出必須符合指定 JSON Schema。
 """.strip()
 
 
@@ -146,6 +198,6 @@ def evaluator_input(*, mode: str, messages: list[dict]) -> str:
 模式：{mode}
 本次評析對象：{target}
 
-請依逐字稿產生具證據的形成性回饋：
+請依逐字稿產生具證據的形成性回饋；若為 experience 模式，同時產生供下次續談使用的去識別 continuity 摘要：
 {transcript}
 """.strip()
