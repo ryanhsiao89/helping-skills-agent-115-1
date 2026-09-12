@@ -93,6 +93,9 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
 
     即使 Secrets 仍殘留舊版 GEMINI_API_KEY / GEMINI_API_KEYS，也刻意忽略，
     避免學生流量誤用教師的 Gemini 配額。
+
+    Email OTP 同時相容新版 [email].sender/password 與舊版
+    [email].sender_email/app_password，方便沿用既有 Streamlit Secrets。
     """
     service_json = str(_value(secrets, "GOOGLE_SERVICE_ACCOUNT_JSON", "") or "").strip()
     if not service_json:
@@ -107,10 +110,16 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         email_cfg = {}
 
     email_sender = str(
-        email_cfg.get("sender", _value(secrets, "SENDER_EMAIL", "")) or ""
+        email_cfg.get("sender")
+        or email_cfg.get("sender_email")
+        or _value(secrets, "SENDER_EMAIL", "")
+        or ""
     ).strip()
     email_password = str(
-        email_cfg.get("password", _value(secrets, "SENDER_PASSWORD", "")) or ""
+        email_cfg.get("password")
+        or email_cfg.get("app_password")
+        or _value(secrets, "SENDER_PASSWORD", "")
+        or ""
     ).strip()
     smtp_host = str(
         email_cfg.get("smtp_host", _value(secrets, "SMTP_HOST", "smtp.gmail.com"))
