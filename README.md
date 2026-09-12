@@ -11,7 +11,7 @@
 - 完整三階段或單一階段練習。
 - 依介入品質漸進式揭露個案資訊。
 - 對話生成與晤談後評量使用兩次獨立模型呼叫。
-- Gemini API Key 輪替。
+- 每位學生自行輸入自己的 Gemini API Key；Key 不寫入 Google Sheets、逐字稿或評量紀錄。
 - Google Sheets 自動建立 Sessions、ChatLogs、SkillEvents、Assessments 四張工作表。
 - 紀錄匿名代碼、使用次數、起訖時間、秒數、階段、模型、Prompt 版本與完整逐字稿。
 - 教師後台查看與下載四類 CSV。
@@ -78,21 +78,22 @@ https://docs.google.com/spreadsheets/d/這一段就是SPREADSHEET_ID/edit
 
 服務帳戶原本無法存取任何私人試算表；必須把指定試算表分享給服務帳戶。官方參考：[Google Cloud 建立服務帳戶](https://cloud.google.com/iam/docs/service-accounts-create)、[gspread Service Account 驗證](https://docs.gspread.org/en/latest/oauth2.html)
 
-## 步驟四 取得 Gemini API Key
+## 步驟四 學生各自取得 Gemini API Key
 
-1. 進入 [Google AI Studio API Keys](https://aistudio.google.com/app/apikey)。
-2. 建立或選擇專案，按 `Create API key`。
-3. 複製 API Key，之後只放入 Streamlit Secrets。
-4. 若準備兩把 Key，可在 `GEMINI_API_KEYS` 放入兩把；第一把發生配額或連線錯誤時，程式會嘗試下一把。
+1. 每位學生使用自己的 Google 帳號進入 [Google AI Studio API Keys](https://aistudio.google.com/app/apikey)。
+2. 建立或選擇自己的專案，按 `Create API key`。
+3. 複製自己的 API Key；上課進入本系統時，貼入「Gemini API Key」密碼欄位。
+4. API Key 只暫存在該次 Streamlit session，用來呼叫 Gemini；同一位學生在自己的筆電開始下一段練習時可沿用，不必重複輸入。系統不會把 Key 寫入 Google Sheets、Sessions、ChatLogs、Assessments 或下載逐字稿。
+5. 學生不得把 API Key 傳給其他同學；若懷疑 Key 外洩，應立即到 Google AI Studio / Google Cloud 撤銷並重新建立。
 
-本版預設 `gemini-3.8-flash`。若帳戶尚未提供該模型，可在 Secrets 把 `MODEL_NAME` 與 `EVALUATOR_MODEL_NAME` 改為帳戶可用的模型，例如 `gemini-2.5-flash`。官方參考：[Gemini API Getting started](https://ai.google.dev/gemini-api/docs/get-started)、[Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
+模型名稱仍由教師端統一設定，以維持研究條件一致。本版預設 `gemini-3.8-flash`；若該模型不可用，可在 Streamlit Secrets 調整 `MODEL_NAME` 與 `EVALUATOR_MODEL_NAME`。官方參考：[Gemini API Getting started](https://ai.google.dev/gemini-api/docs/get-started)、[Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
 
 ## 步驟五 準備 Streamlit Secrets
 
 開啟 `.streamlit/secrets.toml.example`，依下列原則換成真實值：
 
 ```toml
-GEMINI_API_KEYS = ["第一把Key", "第二把Key"]
+# Gemini API Key 不放在教師端 Secrets；由每位學生自行輸入。
 MODEL_NAME = "gemini-3.8-flash"
 EVALUATOR_MODEL_NAME = "gemini-3.8-flash"
 DIALOGUE_TEMPERATURE = 0.35
@@ -123,7 +124,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = '''
 4. Branch 選 `main`。
 5. Main file path 填 `app.py`。
 6. 開啟 `Advanced settings` → `Secrets`。
-7. 把步驟五完成的 TOML 全部貼入 Secrets，按儲存。
+7. 把步驟五完成的 TOML 貼入 Secrets，按儲存；不要加入教師共用的 `GEMINI_API_KEY` 或 `GEMINI_API_KEYS`。
 8. 按 `Deploy`，等待套件安裝與網站啟動。
 
 Streamlit 官方說明指出，部署時應在 Advanced settings 儲存 Secrets，不應把未加密密鑰提交到 Git Repository：[部署應用程式](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app)、[Secrets management](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)
@@ -131,8 +132,8 @@ Streamlit 官方說明指出，部署時應在 Advanced settings 儲存 Secrets�
 ## 步驟七 第一次驗收
 
 1. 開啟部署後的網址。
-2. 左側應顯示 `Gemini：已設定` 與 `Google Sheets：已連線`。
-3. 使用匿名代碼 `TEST001` 開始一段「實作模式」。
+2. 左側在尚未輸入學生 Key 前應顯示 `Gemini：請由學生輸入自己的 API Key`，且 `Google Sheets：已連線`。
+3. 使用匿名代碼 `TEST001`，並輸入測試者自己的 Gemini API Key，開始一段「實作模式」。
 4. 至少輸入兩輪，按 `結束並查看回饋`。
 5. 回到 Google 試算表，應看到以下工作表：
    - `Sessions`：一列 Session，包含開始、結束、秒數及完成狀態。
@@ -150,7 +151,7 @@ Streamlit 官方說明指出，部署時應在 Advanced settings 儲存 Secrets�
 | Google Sheets 尚未連線 | 試算表 ID 或服務帳戶 JSON 錯誤 | 重新核對 Secrets，不要貼入多餘符號 |
 | `SpreadsheetNotFound` | 試算表未分享給服務帳戶 | 將 JSON 的 `client_email` 加為該試算表編輯者 |
 | Secrets 出現 TOML 錯誤 | JSON 外層引號或換行被改動 | 使用三個單引號包住完整 JSON |
-| Gemini API 呼叫失敗 | Key 無效、模型不可用或配額已滿 | 檢查 AI Studio 用量；改用可用模型或加入第二把 Key |
+| Gemini API 呼叫失敗 | 學生 Key 無效、模型不可用或該學生配額已滿 | 請該學生檢查自己的 AI Studio API Key 與用量；不要改用教師共用 Key |
 | 工作表第一列欄位不一致 | 曾人工改名、刪欄或使用舊版 Schema | 先備份資料；不要直接讓新版程式覆寫舊欄位 |
 | 教師後台停用 | 未設定 `ADMIN_PASSWORD` | 在 Streamlit App settings 的 Secrets 補上密碼 |
 
@@ -179,7 +180,7 @@ pytest -q
 
 ## 研究與倫理注意事項
 
-- 只要求學生輸入教師分配的 `participant_id`；姓名、Email 與對照表應另存於權限更嚴格的位置。
+- 學生需輸入教師分配的 `participant_id` 與自己的 Gemini API Key；API Key 只用於當次模型呼叫，不得寫入研究資料。姓名、Email 與對照表應另存於權限更嚴格的位置。
 - Google Sheets 保存完整原始逐字稿；不應只留摘要。
 - `raw_model_output` 與 `parsed_json` 分開保存，重新評量時新增新列，不覆蓋舊結果。
 - 正式研究前應固定 `model_name`、`prompt_version`、`rubric_version` 與 temperature，並記錄改版日期。
