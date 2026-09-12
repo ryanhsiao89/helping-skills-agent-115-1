@@ -24,7 +24,7 @@
 - 對話生成與晤談後評量使用獨立模型呼叫。
 - 每位學生自行輸入自己的 Gemini API Key；Key 不寫入 Google Sheets、逐字稿或評量紀錄。
 - 完整逐字稿下載：學生可自行保存本次 `.txt` 逐字稿供課後反思。
-- 教師後台查看與下載各資料表 CSV。
+- 教師後台提供每位學生的 Session 次數、完成次數、總練習分鐘數、體驗／實作次數與最近活動時間摘要。
 - 明確第一人稱即時危機語句的最低限度安全攔截。
 - GitHub Actions 自動執行語法檢查與離線測試。
 
@@ -118,16 +118,17 @@ OTP_TTL_SECONDS = 600
 OTP_RESEND_SECONDS = 60
 OTP_MAX_ATTEMPTS = 5
 
+# 必須保持在 TOML 頂層，所以放在 [email] 之前。
+GOOGLE_SERVICE_ACCOUNT_JSON = '''
+把下載的服務帳戶 JSON 全部原封不動貼在這裡
+'''
+
 [email]
 # 可沿用舊版 Agent 已使用的 Gmail SMTP 寄件帳號與 Google App Password。
 sender = "你的寄件Gmail@gmail.com"
 password = "你的Google App Password"
 smtp_host = "smtp.gmail.com"
 smtp_port = 465
-
-GOOGLE_SERVICE_ACCOUNT_JSON = '''
-把下載的服務帳戶 JSON 全部原封不動貼在這裡
-'''
 ```
 
 注意：
@@ -161,14 +162,14 @@ GOOGLE_SERVICE_ACCOUNT_JSON = '''
 7. 確認畫面仍有逐字稿下載按鈕。
 8. 體驗模式另測一次：開始新談話並勾選保留 → 結束 → 開始另一段 → 選「繼續上次談話」，確認 Agent 能承接前次內容。
 9. 確認 `ContinuityMemory.pin_hash` 在 Email OTP 版保持空白；這是舊版相容欄位。
-10. 教師後台應可看到 `StudentRoster` 與其他研究資料表。
+10. 教師後台應可看到 `StudentRoster`、學生使用摘要與其他研究資料表。
 
 ## 專案結構
 
 ```text
 helping-skills-agent/
 ├─ app.py                         學生端主程式、OTP 登入與練習流程
-├─ pages/1_教師後台.py            教師端資料檢視與匯出
+├─ pages/1_教師後台.py            教師端資料檢視、學生使用摘要與匯出
 ├─ src/
 │  ├─ email_otp.py               學校 Email、OTP、Gmail SMTP 工具
 │  ├─ continuity.py              跨次記憶整理
