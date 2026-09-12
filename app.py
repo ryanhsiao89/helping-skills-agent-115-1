@@ -441,7 +441,7 @@ def handle_user_turn(
 
 
 def reset_for_new_session() -> None:
-    # 清除上一段練習資料，也清除學生 API Key，避免共用電腦時被下一位使用者沿用。
+    # 清除上一段練習資料，但保留學生 API Key，方便同一位學生在自己的筆電繼續下一段練習。
     for key in (
         "active_session",
         "messages",
@@ -449,7 +449,6 @@ def reset_for_new_session() -> None:
         "assessment",
         "assessment_error",
         "logging_error",
-        "student_api_key",
     ):
         if key in st.session_state:
             del st.session_state[key]
@@ -532,13 +531,14 @@ if not session:
         student_api_key = st.text_input(
             "Gemini API Key",
             type="password",
+            value=st.session_state.get("student_api_key", ""),
             placeholder="請貼上你自己的 Gemini API Key",
             help=(
-                "此 Key 只用於你目前這次瀏覽器 session 的 Gemini 呼叫，"
-                "不會寫入 Google Sheets、逐字稿或評量紀錄。"
+                "此 Key 只暫存在你目前的 Streamlit 瀏覽器 session，"
+                "可供同一位學生連續進行多段練習；不會寫入 Google Sheets、逐字稿或評量紀錄。"
             ),
         ).strip()
-        st.caption("請勿使用他人的 API Key。關閉瀏覽器 session 或開始另一段練習後，本系統不再保留此 Key。")
+        st.caption("請勿使用他人的 API Key。只要目前瀏覽器 session 仍在，開始另一段練習時會沿用你自己的 Key，不必重複貼上。")
 
         access_code = ""
         if settings.course_access_code:
