@@ -24,6 +24,69 @@ def csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8-sig")
 
 
+def build_student_usage_summary(roster: pd.DataFrame, sessions: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "school_email",
+        "participant_id",
+        "sessions_started",
+        "sessions_completed",
+        "total_minutes",
+        "experience_sessions",
+        "practice_sessions",
+        "last_activity",
+    ]
+    if roster.empty:
+        return pd.DataFrame(columns=columns)
+
+    base = roster[["school_email", "participant_id"]].copy()
+    if sessions.empty:
+        for column in (
+            "sessions_started",
+            "sessions_completed",
+            "experience_sessions",
+            "practice_sessions",
+        ):
+            base[column] = 0
+        base["total_minutes"] = 0.0
+        base["last_activity"] = ""
+        return base[columns]
+
+    work = sessions.copy()
+    work["duration_seconds_numeric"] = pd.to_numeric(
+        work["duration_seconds"], errors="coerce"
+    ).fillna(0)
+    work["is_completed"] = work["completion_status"].isin(
+        ["completed", "completed_evaluation_error", "safety_ended"]
+    )
+
+    grouped = (
+        work.groupby("participant_id", dropna=False)
+        .agg(
+            sessions_started=("session_id", "count"),
+            sessions_completed=("is_completed", "sum"),
+            total_seconds=("duration_seconds_numeric", "sum"),
+            experience_sessions=("mode", lambda values: int((values == "experience").sum())),
+            practice_sessions=("mode", lambda values: int((values == "practice").sum())),
+            last_activity=("started_at", "max"),
+        )
+        .reset_index()
+    )
+    grouped["total_minutes"] = (grouped["total_seconds"] / 60).round(1)
+    grouped = grouped.drop(columns=["total_seconds"])
+
+    summary = base.merge(grouped, on="participant_id", how="left")
+    for column in (
+        "sessions_started",
+        "sessions_completed",
+        "experience_sessions",
+        "practice_sessions",
+    ):
+        summary[column] = summary[column].fillna(0).astype(int)
+    summary["total_minutes"] = summary["total_minutes"].fillna(0.0)
+    summary["last_activity"] = summary["last_activity"].fillna("")
+    return summary[columns].sort_values(["school_email", "participant_id"])
+
+
 settings = load_settings(st.secrets)
 st.title("助人技巧訓練 Agent 教師後台")
 st.caption("查看學生身分對照、練習歷程與匯出研究資料；AI 回饋不等同標準化測驗成績。")
@@ -84,6 +147,18 @@ metric_columns[2].metric(
 )
 metric_columns[3].metric("逐輪對話數", len(frames["ChatLogs"]))
 metric_columns[4].metric("技巧事件數", len(frames["SkillEvents"]))
+
+student_summary = build_student_usage_summary(frames["StudentRoster"], sessions)
+st.subheader("學生使用摘要")
+st.caption("供教師快速檢視平時練習參與情形；詳細內容仍以各原始資料表為準。")
+st.dataframe(student_summary, use_container_width=True, hide_index=True)
+st.download_button(
+    "下載學生使用摘要.csv",
+    data=csv_bytes(student_summary),
+    file_name="StudentUsageSummary.csv",
+    mime="text/csv",
+    key="download_student_usage_summary",
+)
 
 tabs = st.tabs(list(SHEET_HEADERS))
 for tab, (sheet_name, frame) in zip(tabs, frames.items(), strict=True):
