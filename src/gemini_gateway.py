@@ -83,6 +83,18 @@ class GeminiGateway:
         return genai.Client(api_key=api_key)
 
     @staticmethod
+    def _close_client(client: Any | None) -> None:
+        """明確關閉 SDK client；測試替身若沒有 close() 則略過。"""
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    @staticmethod
     def _is_gemini_3(model_name: str) -> bool:
         return model_name.startswith("gemini-3")
 
@@ -128,6 +140,7 @@ class GeminiGateway:
 
             for generation_config in configs:
                 started = time.perf_counter()
+                client = None
                 try:
                     request: dict[str, Any] = {
                         "model": self.model_name,
@@ -138,7 +151,11 @@ class GeminiGateway:
                     if generation_config is not None:
                         request["generation_config"] = generation_config
 
-                    response = self._client(api_key).interactions.create(**request)
+                    # 重要：必須保留 Client 的強參照直到請求完成。
+                    # 若直接 self._client(...).interactions.create(...)，google-genai
+                    # 可能在鏈式呼叫期間回收暫時 Client，導致 httpx client 提前關閉。
+                    client = self._client(api_key)
+                    response = client.interactions.create(**request)
                     text = (response.output_text or "").strip()
                     if not text:
                         raise ValueError("模型回傳空白內容")
@@ -147,11 +164,11 @@ class GeminiGateway:
                     return TextResult(text=text, latency_ms=latency, key_slot=index)
                 except Exception as exc:  # SDK 錯誤型別會隨版本擴充；統一重試/輪替 Key。
                     last_error = exc
+                finally:
+                    self._close_client(client)
 
         detail = _safe_error_detail(last_error)
-        raise GatewayError(
-            "Gemini API 呼叫失敗。安全診斷：" + detail
-        ) from last_error
+        raise GatewayError("Gemini API 呼叫失敗。安全診斷：" + detail) from last_error
 
     def generate_structured(
         self,
@@ -175,6 +192,7 @@ class GeminiGateway:
             for generation_config in configs:
                 started = time.perf_counter()
                 raw_text = ""
+                client = None
                 try:
                     request: dict[str, Any] = {
                         "model": selected_model,
@@ -190,7 +208,9 @@ class GeminiGateway:
                     if generation_config is not None:
                         request["generation_config"] = generation_config
 
-                    response = self._client(api_key).interactions.create(**request)
+                    # 與 generate_text 相同，避免暫時 Client 被提早回收／關閉。
+                    client = self._client(api_key)
+                    response = client.interactions.create(**request)
                     raw_text = (response.output_text or "").strip()
                     parsed = schema.model_validate_json(raw_text)
                     latency = int((time.perf_counter() - started) * 1000)
@@ -204,8 +224,8 @@ class GeminiGateway:
                     last_error = exc
                 except Exception as exc:
                     last_error = exc
+                finally:
+                    self._close_client(client)
 
         detail = _safe_error_detail(last_error)
-        raise GatewayError(
-            "晤談後回饋產生失敗。安全診斷：" + detail
-        ) from last_error
+        raise GatewayError("晤談後回饋產生失敗。安全診斷：" + detail) from last_error
