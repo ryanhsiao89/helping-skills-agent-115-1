@@ -22,11 +22,29 @@ def test_loads_teacher_settings_without_server_gemini_key():
     assert settings.service_account_info()["client_email"] == "bot@example.test"
     assert settings.require_sheets is True
     assert settings.email_sender == "teacher@gmail.com"
+    assert settings.email_password == "app-password"
     assert settings.school_email_domains == ("school.edu.tw",)
     assert settings.otp_configured is True
     assert settings.otp_ttl_seconds == 600
     assert settings.otp_resend_seconds == 60
     assert settings.otp_max_attempts == 5
+
+
+def test_legacy_email_secret_names_are_supported():
+    settings = load_settings(
+        {
+            "SCHOOL_EMAIL_DOMAINS": ["hcu.edu.tw"],
+            "email": {
+                "sender_email": "legacy@gmail.com",
+                "app_password": "legacy-app-password",
+            },
+        }
+    )
+
+    assert settings.email_sender == "legacy@gmail.com"
+    assert settings.email_password == "legacy-app-password"
+    assert settings.school_email_domains == ("hcu.edu.tw",)
+    assert settings.otp_configured is True
 
 
 def test_legacy_server_gemini_keys_are_ignored():
