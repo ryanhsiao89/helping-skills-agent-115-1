@@ -86,4 +86,21 @@ SHEET_HEADERS: dict[str, list[str]] = {
         "evaluator_temperature",
         "status",
     ],
+    # 跨日續談記憶。既有四張研究資料表完全不改欄位，避免舊資料 schema mismatch。
+    "ContinuityMemory": [
+        "memory_id",
+        "participant_id",
+        "conversation_id",
+        "session_id",
+        "parent_session_id",
+        "session_number",
+        "updated_at",
+        "topic_label",
+        "summary_text",
+        "unresolved_points_json",
+        "next_opening",
+        "recent_context_json",
+        "pin_hash",
+        "memory_status",
+    ],
 }
