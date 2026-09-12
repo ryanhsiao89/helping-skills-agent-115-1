@@ -26,7 +26,7 @@ def csv_bytes(frame: pd.DataFrame) -> bytes:
 
 settings = load_settings(st.secrets)
 st.title("助人技巧訓練 Agent 教師後台")
-st.caption("查看原始紀錄與匯出研究資料；AI 回饋不等同標準化測驗成績。")
+st.caption("查看學生身分對照、練習歷程與匯出研究資料；AI 回饋不等同標準化測驗成績。")
 
 if not settings.admin_password:
     st.error("尚未在 Secrets 設定 ADMIN_PASSWORD，教師後台已停用。")
@@ -73,16 +73,17 @@ except SheetsStoreError as exc:
     st.stop()
 
 sessions = frames["Sessions"]
-metric_columns = st.columns(4)
-metric_columns[0].metric("Session 數", len(sessions))
-metric_columns[1].metric(
+metric_columns = st.columns(5)
+metric_columns[0].metric("已驗證學生", len(frames["StudentRoster"]))
+metric_columns[1].metric("Session 數", len(sessions))
+metric_columns[2].metric(
     "完成數",
     int(sessions["completion_status"].isin(["completed", "completed_evaluation_error"]).sum())
     if not sessions.empty
     else 0,
 )
-metric_columns[2].metric("逐輪對話數", len(frames["ChatLogs"]))
-metric_columns[3].metric("技巧事件數", len(frames["SkillEvents"]))
+metric_columns[3].metric("逐輪對話數", len(frames["ChatLogs"]))
+metric_columns[4].metric("技巧事件數", len(frames["SkillEvents"]))
 
 tabs = st.tabs(list(SHEET_HEADERS))
 for tab, (sheet_name, frame) in zip(tabs, frames.items(), strict=True):
