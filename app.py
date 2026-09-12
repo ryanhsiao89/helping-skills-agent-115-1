@@ -392,7 +392,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
             except SheetsStoreError:
                 pass
 
-    # 即使形成性評量失敗，體驗模式仍保存「最後幾輪」fallback，避免隔天完全失去續談脈絡。
+    # 即使形成性評量失敗，體驗模式仍保存「最後幾輪」fallback；未啟用續談時 save_continuity_memory 會直接略過。
     if session.get("mode") == "experience":
         try:
             save_continuity_memory(
@@ -580,7 +580,7 @@ with st.sidebar:
         st.info("Gemini：請由學生輸入自己的 API Key")
     if store.enabled:
         st.success("Google Sheets：已連線")
-        st.caption("續談記憶：由匿名學習者代碼＋6 位 PIN 驗證")
+        st.caption("續談記憶：僅在學生選擇保留或續談時啟用，並以匿名學習者代碼＋6 位 PIN 驗證")
     elif settings.require_sheets:
         st.error("Google Sheets：尚未連線")
     else:
@@ -596,7 +596,7 @@ session = st.session_state.active_session
 if not session:
     st.subheader("開始一段練習")
 
-    # 放在 form 外，使切換模式時能立即更新相應表單欄位。
+    # 放在 form 外，使切換模式／續談選項時能立即更新相應欄位。
     mode = st.radio(
         "訓練模式",
         options=list(MODE_LABELS),
@@ -604,6 +604,28 @@ if not session:
         key="start_mode",
         horizontal=True,
     )
+
+    conversation_action = "new"
+    retain_for_continuity = False
+    if mode == "experience":
+        st.markdown("#### 跨日續談")
+        conversation_action = st.radio(
+            "這次要怎麼談？",
+            options=["new", "continue"],
+            format_func=lambda value: (
+                "開始新的談話" if value == "new" else "繼續上次談話"
+            ),
+            key="conversation_action",
+            horizontal=True,
+        )
+        if conversation_action == "new":
+            retain_for_continuity = st.checkbox(
+                "我希望保留本次談話供下次續談",
+                value=False,
+                key="retain_for_continuity",
+            )
+        else:
+            retain_for_continuity = True
 
     with st.form("start_session_form"):
         participant_id = st.text_input(
@@ -627,6 +649,20 @@ if not session:
         if settings.course_access_code:
             access_code = st.text_input("課程通行碼", type="password")
 
+        continuity_pin = ""
+        if mode == "experience" and retain_for_continuity:
+            continuity_pin = st.text_input(
+                "續談 PIN（6 位數）",
+                type="password",
+                max_chars=6,
+                help=(
+                    "只有啟用續談功能時需要 PIN。第一次保留談話時自行設定 6 位數並記住；"
+                    "之後同一匿名代碼必須輸入相同 PIN 才能續談。後台只保存不可逆雜湊，不保存原始 PIN。"
+                ),
+            ).strip()
+        elif mode == "experience":
+            st.caption("本次不保留續談記憶，因此不需要設定 PIN。")
+
         duration_target_min = st.select_slider(
             "建議練習時間（不會強制中斷）",
             options=[5, 8, 10, 12, 15, 20],
@@ -636,28 +672,8 @@ if not session:
         experience_topic_id = "interpersonal"
         case_id = "college_peer_01"
         training_path = "full"
-        conversation_action = "new"
-        continuity_pin = ""
 
         if mode == "experience":
-            st.markdown("#### 跨日續談")
-            conversation_action = st.radio(
-                "這次要怎麼談？",
-                options=["new", "continue"],
-                format_func=lambda value: (
-                    "開始新的談話" if value == "new" else "繼續上次談話"
-                ),
-                horizontal=True,
-            )
-            continuity_pin = st.text_input(
-                "續談 PIN（6 位數）",
-                type="password",
-                max_chars=6,
-                help=(
-                    "第一次使用請自行設定 6 位數並記住；之後同一匿名代碼必須輸入相同 PIN 才能續談。"
-                    "後台只保存不可逆雜湊，不保存原始 PIN。"
-                ),
-            ).strip()
             experience_topic_id = st.selectbox(
                 "這次想體驗的主題",
                 options=list(EXPERIENCE_TOPICS),
@@ -666,8 +682,10 @@ if not session:
             )
             if conversation_action == "continue":
                 st.info("系統會在送出後，用匿名學習者代碼＋PIN 找到最近一次已完成談話的摘要與最後幾輪，自動承接。")
+            elif retain_for_continuity:
+                st.info("體驗模式中，AI 擔任示範助人者；本次結束後會建立供下次續談的去識別摘要。")
             else:
-                st.info("體驗模式中，AI 擔任示範助人者；本次結束後會自動建立供下次續談的去識別摘要。")
+                st.info("體驗模式中，AI 擔任示範助人者；本次不建立跨日續談記憶。")
         else:
             options = case_options()
             case_id = st.selectbox(
@@ -709,9 +727,10 @@ if not session:
         if settings.require_sheets and not store.enabled:
             errors.append("研究模式要求 Google Sheets 正常連線後才能開始。")
 
-        if mode == "experience" and PARTICIPANT_PATTERN.fullmatch(participant_id):
+        continuity_requested = mode == "experience" and retain_for_continuity
+        if continuity_requested and PARTICIPANT_PATTERN.fullmatch(participant_id):
             if not valid_pin(continuity_pin):
-                errors.append("體驗模式的續談 PIN 必須是 6 位數字。")
+                errors.append("啟用續談功能時，續談 PIN 必須是 6 位數字。")
             elif store.enabled:
                 try:
                     latest = store.latest_continuity(participant_id)
@@ -818,7 +837,10 @@ else:
             controls[0].empty()
 
         if controls[1].button("結束並查看回饋", type="primary", use_container_width=True):
-            with st.spinner("正在根據逐字稿產生形成性回饋並建立續談摘要……"):
+            spinner_text = "正在根據逐字稿產生形成性回饋……"
+            if session.get("mode") == "experience" and session.get("continuity_pin_hash"):
+                spinner_text = "正在根據逐字稿產生形成性回饋並建立續談摘要……"
+            with st.spinner(spinner_text):
                 finish_session(settings, store, gateway)
             st.rerun()
 
