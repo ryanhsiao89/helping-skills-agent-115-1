@@ -1,5 +1,17 @@
 # 助人技巧 Agent 資料字典
 
+## StudentRoster
+
+每位學生第一次以學校 Email 完成 OTP 驗證後建立一列。`school_email` 用於教師辨識學生身分與平時成績追蹤；其他研究與對話資料表以 `participant_id` 串接，避免 Email 重複出現在每一筆逐字紀錄。
+
+| 欄位 | 意義 |
+| --- | --- |
+| participant_id | 系統由已驗證學校 Email 產生的穩定去識別代碼 |
+| school_email | 已完成 OTP 驗證的學校 Email |
+| first_verified_at | 第一次完成驗證的 Asia/Taipei ISO 8601 時戳 |
+
+OTP 本身只暫存在目前 Streamlit session 的雜湊狀態，不寫入 Google Sheets、逐字稿或 log。
+
 ## Sessions
 
 每一列代表一次練習。Session 開始時先寫入 `in_progress`，按下結束後更新同一列。跨日續談時仍會建立新的 `session_id`，避免不同日期的研究資料混在同一列。
@@ -7,7 +19,7 @@
 | 欄位 | 意義 |
 | --- | --- |
 | session_id | UUID，Sessions、ChatLogs、SkillEvents、Assessments 的主要串接鍵 |
-| participant_id | 教師分配的匿名學習者代碼 |
+| participant_id | 對應 StudentRoster 的穩定學習者代碼 |
 | agent_type | 固定為 helping |
 | mode | experience 或 practice |
 | started_at、ended_at | Asia/Taipei ISO 8601 時戳 |
@@ -72,12 +84,12 @@
 
 ## ContinuityMemory
 
-僅供 `experience` 體驗模式的跨日續談使用。每次按下「結束並查看回饋」後新增一列。學生下次不需要下載或重新上傳逐字稿；系統以 `participant_id` 找到最新記憶，再用 6 位續談 PIN 驗證後載入。PIN 原文永遠不寫入試算表。
+僅供 `experience` 體驗模式的跨日續談使用。只有學生主動勾選「保留本次談話供下次續談」或選擇「繼續上次談話」時，結束後才新增一列。學生下次不需要重新上傳逐字稿；完成相同學校 Email 的 OTP 驗證後，系統依 `participant_id` 找到最新已保留記憶。
 
 | 欄位 | 意義 |
 | --- | --- |
 | memory_id | 每筆續談記憶 UUID |
-| participant_id | 匿名學習者代碼；用來搜尋該學習者最新記憶 |
+| participant_id | 對應 StudentRoster 的學習者代碼 |
 | conversation_id | 同一條跨日談話系列的 UUID；續談時沿用，新談話則重新建立 |
 | session_id | 產生這筆記憶的本次 Session |
 | parent_session_id | 若本次為續談，記錄上一個 Session；新談話留空 |
@@ -88,12 +100,14 @@
 | unresolved_points_json | 尚未談完、適合下次延續的重點 |
 | next_opening | 下一次 AI 可使用的自然承接開場 |
 | recent_context_json | 前次最後數輪非 system 對話，用於補足摘要脈絡 |
-| pin_hash | 6 位續談 PIN 的 PBKDF2 摘要；不是原始 PIN |
+| pin_hash | 舊版相容欄位；Email OTP 版固定留空，以避免既有工作表 schema mismatch |
 | memory_status | `ready` 表示評量模型成功產生摘要；`fallback` 表示評量失敗但仍保存最後數輪供續談 |
 
-### 續談資料原則
+### 續談與逐字稿原則
 
-- `ContinuityMemory` 不保存 Gemini API Key，也不保存續談 PIN 原文。
-- 送給 Gemini 的續談 context 只含主題、摘要、未竟重點與最後數輪；不包含 `pin_hash`、`session_id`、`conversation_id` 等後台識別欄位。
-- 每次跨日續談仍建立新的 Session，因此研究分析可以保留每一次晤談的獨立起訖時間、逐字稿與形成性回饋。
+- `StudentRoster` 保存教師需要的學校 Email 與 `participant_id` 對照；Email 不重複寫入 ChatLogs。
+- OTP 不保存；Gemini API Key 也不保存。
+- 送給 Gemini 的續談 context 只含主題、摘要、未竟重點與最後數輪；不包含學校 Email、`session_id`、`conversation_id` 等後台識別欄位。
+- 每次跨日續談仍建立新的 Session，因此可保留每一次晤談的獨立起訖時間、逐字稿與形成性回饋。
+- 學生完成練習後仍可自行下載本次逐字稿，供課後重新閱讀、自我反思與學習；續談本身不需要重新上傳逐字稿。
 - 即時危機攔截造成 `safety_ended` 時，不建立一般續談記憶；應依課程安全程序處理，而不是由 AI 自動延續高風險內容。
