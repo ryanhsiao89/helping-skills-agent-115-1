@@ -16,6 +16,11 @@ def test_school_email_domain_validation_and_masking():
     assert mask_email("student@school.edu.tw") == "st***@school.edu.tw"
 
 
+def test_owner_gmail_is_the_only_default_private_test_email():
+    assert email_allowed("ryanhsiao89@gmail.com", ("hcu.edu.tw",)) is True
+    assert email_allowed("otherperson@gmail.com", ("hcu.edu.tw",)) is False
+
+
 def test_participant_id_is_stable_and_pseudonymous():
     first = participant_id_for_email("student@school.edu.tw")
     second = participant_id_for_email("STUDENT@SCHOOL.EDU.TW")
