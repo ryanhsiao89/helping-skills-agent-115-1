@@ -14,6 +14,7 @@ import socket
 from email.mime.text import MIMEText
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+DEFAULT_TEST_EMAILS = ("ryanhsiao89@gmail.com",)
 
 
 def normalize_email(email: str) -> str:
@@ -23,7 +24,7 @@ def normalize_email(email: str) -> str:
 def email_allowed(
     email: str,
     allowed_domains: tuple[str, ...],
-    allowed_emails: tuple[str, ...] = (),
+    allowed_emails: tuple[str, ...] = DEFAULT_TEST_EMAILS,
 ) -> bool:
     """允許指定學校網域，或教師明確列出的測試 Email；不開放整個私人網域。"""
     normalized = normalize_email(email)
