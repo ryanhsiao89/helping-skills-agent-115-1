@@ -52,6 +52,8 @@ def init_state() -> None:
         "assessment_error": "",
         "logging_error": "",
         "admin_ok": False,
+        # 僅保存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
+        "student_api_key": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -68,12 +70,8 @@ def cached_store(service_account_json: str, spreadsheet_id: str):
     return store
 
 
-@st.cache_resource(show_spinner=False)
-def cached_gateway(api_keys: tuple[str, ...], model_name: str) -> GeminiGateway:
-    return GeminiGateway(api_keys=api_keys, model_name=model_name)
-
-
-def load_runtime() -> tuple[Settings, object, GeminiGateway | None, str]:
+def load_runtime() -> tuple[Settings, object, str]:
+    """載入教師端系統設定與 Google Sheets；Gemini Key 不再從教師端 Secrets 取用。"""
     settings = load_settings(st.secrets)
     store_error = ""
     try:
@@ -81,14 +79,19 @@ def load_runtime() -> tuple[Settings, object, GeminiGateway | None, str]:
     except (SheetsStoreError, ValueError, json.JSONDecodeError) as exc:
         store = NullStore()
         store_error = str(exc)
+    return settings, store, store_error
 
-    gateway = None
-    if settings.gemini_configured:
-        try:
-            gateway = cached_gateway(settings.gemini_api_keys, settings.model_name)
-        except ValueError as exc:
-            store_error = f"{store_error} {exc}".strip()
-    return settings, store, gateway, store_error
+
+def build_student_gateway(settings: Settings) -> tuple[GeminiGateway | None, str]:
+    """以目前學生輸入的 API Key 建立 Gateway；Key 僅存在 st.session_state。"""
+    api_key = st.session_state.get("student_api_key", "").strip()
+    if not api_key:
+        return None, ""
+    try:
+        # 不使用 st.cache_resource，避免學生 API Key / Gateway 被跨 session 快取。
+        return GeminiGateway(api_keys=(api_key,), model_name=settings.model_name), ""
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def log_message(
@@ -438,6 +441,7 @@ def handle_user_turn(
 
 
 def reset_for_new_session() -> None:
+    # 清除上一段練習資料，也清除學生 API Key，避免共用電腦時被下一位使用者沿用。
     for key in (
         "active_session",
         "messages",
@@ -445,6 +449,7 @@ def reset_for_new_session() -> None:
         "assessment",
         "assessment_error",
         "logging_error",
+        "student_api_key",
     ):
         if key in st.session_state:
             del st.session_state[key]
@@ -483,7 +488,8 @@ def render_assessment(assessment: dict) -> None:
 
 
 init_state()
-settings, store, gateway, store_error = load_runtime()
+settings, store, store_error = load_runtime()
+gateway, gateway_error = build_student_gateway(settings)
 
 st.title("助人技巧訓練 Agent")
 st.caption("教學模擬、技能演練、歷程紀錄與形成性回饋")
@@ -494,10 +500,12 @@ st.warning(
 
 with st.sidebar:
     st.header("系統狀態")
-    if settings.gemini_configured:
-        st.success(f"Gemini：已設定（{settings.model_name}）")
+    if gateway is not None:
+        st.success(f"Gemini：已使用學生 API Key（{settings.model_name}）")
+    elif gateway_error:
+        st.error(f"Gemini API Key 設定錯誤：{gateway_error}")
     else:
-        st.error("Gemini：尚未設定")
+        st.info("Gemini：請由學生輸入自己的 API Key")
     if store.enabled:
         st.success("Google Sheets：已連線")
     elif settings.require_sheets:
@@ -520,6 +528,18 @@ if not session:
             placeholder="例如 P001",
             help="請使用教師分配的匿名代碼，不要輸入姓名或 Email。",
         ).strip()
+
+        student_api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="請貼上你自己的 Gemini API Key",
+            help=(
+                "此 Key 只用於你目前這次瀏覽器 session 的 Gemini 呼叫，"
+                "不會寫入 Google Sheets、逐字稿或評量紀錄。"
+            ),
+        ).strip()
+        st.caption("請勿使用他人的 API Key。關閉瀏覽器 session 或開始另一段練習後，本系統不再保留此 Key。")
+
         access_code = ""
         if settings.course_access_code:
             access_code = st.text_input("課程通行碼", type="password")
@@ -578,12 +598,25 @@ if not session:
             errors.append("課程通行碼不正確。")
         if not agreed:
             errors.append("請先勾選教學模擬與資料去識別提醒。")
-        if gateway is None:
-            errors.append("尚未設定 Gemini API Key。")
+        if not student_api_key:
+            errors.append("請輸入你自己的 Gemini API Key。")
         if settings.require_sheets and not store.enabled:
             errors.append("研究模式要求 Google Sheets 正常連線後才能開始。")
 
+        # 先把 Key 放進目前學生的 Streamlit session，再建立專屬 Gateway。
+        # Key 不會被加入 session record，也不會傳給 Google Sheets。
+        if not errors:
+            st.session_state.student_api_key = student_api_key
+            gateway, gateway_error = build_student_gateway(settings)
+            if gateway is None:
+                errors.append(
+                    f"Gemini API Key 無法使用：{gateway_error or '請確認 API Key 是否正確。'}"
+                )
+
         if errors:
+            # 若連 Gateway 都無法建立，不保留這把 Key。
+            if gateway is None:
+                st.session_state.student_api_key = ""
             for error in errors:
                 st.error(error)
         else:
@@ -657,7 +690,7 @@ else:
         )
         if user_text:
             if gateway is None:
-                st.error("Gemini API 尚未設定。")
+                st.error("目前沒有可用的學生 Gemini API Key，請重新開始並輸入自己的 API Key。")
             else:
                 with st.spinner("AI 正在回應……"):
                     handle_user_turn(
