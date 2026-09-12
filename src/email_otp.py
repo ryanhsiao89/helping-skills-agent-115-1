@@ -75,6 +75,19 @@ def otp_matches(email: str, otp_code: str, nonce: str, expected_digest: str) -> 
     )
 
 
+def _smtp_password(value: str) -> str:
+    """移除 App Password 複製時可能夾帶的各類空白。"""
+    return "".join(str(value or "").split())
+
+
+def _is_ascii(value: str) -> bool:
+    try:
+        value.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def send_otp_email(
     *,
     receiver_email: str,
@@ -87,11 +100,21 @@ def send_otp_email(
     """以 Gmail/SMTP SSL 寄送 OTP；錯誤訊息分類但不暴露密碼。"""
     sender = normalize_email(sender_email)
     receiver = normalize_email(receiver_email)
-    password = str(sender_password or "").replace(" ", "").strip()
+    password = _smtp_password(sender_password)
     if not sender or not password:
         raise RuntimeError(
             "寄件信箱尚未設定。請確認 Streamlit Secrets 的 [email] 區塊；"
             "新版 sender/password 與舊版 sender_email/app_password 都支援。"
+        )
+    if not _is_ascii(sender):
+        raise RuntimeError(
+            "寄件帳號含有非英數字元。請確認 Streamlit Secrets 不是仍填著中文示範文字，"
+            "而是真實可登入的寄件 Gmail/Google Workspace Email。"
+        )
+    if not _is_ascii(password):
+        raise RuntimeError(
+            "Google App Password 含有非 ASCII 字元。請重新複製 Google 產生的 App Password；"
+            "不要填中文說明文字、一般 Gmail 密碼或其他註解。"
         )
 
     msg = MIMEText(
@@ -110,6 +133,11 @@ def send_otp_email(
         with smtplib.SMTP_SSL(smtp_host, int(smtp_port), timeout=20) as server:
             server.login(sender, password)
             server.send_message(msg)
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "寄件帳號或 App Password 含有 SMTP 無法使用的字元；"
+            "請確認 Secrets 中填的是實際 Gmail 與 Google App Password。"
+        ) from exc
     except smtplib.SMTPAuthenticationError as exc:
         raise RuntimeError(
             "Gmail 驗證失敗：請確認寄件帳號與 Google App Password 是否正確，"
