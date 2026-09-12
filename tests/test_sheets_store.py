@@ -65,7 +65,40 @@ def test_empty_default_sheet_is_reused_and_schema_created():
     store.ensure_schema()
 
     assert set(store.spreadsheet.by_title) == set(SHEET_HEADERS)
+    assert "ContinuityMemory" in store.spreadsheet.by_title
     for name, headers in SHEET_HEADERS.items():
         worksheet = store.spreadsheet.by_title[name]
         assert worksheet.rows[0] == headers
         assert worksheet.frozen is True
+
+
+def test_latest_continuity_returns_latest_ready_or_fallback_row():
+    store = object.__new__(SheetsStore)
+    store.read_all = lambda _sheet_name: [
+        {
+            "participant_id": "P001",
+            "updated_at": "2026-09-10T10:00:00+08:00",
+            "session_number": 1,
+            "memory_status": "ready",
+            "summary_text": "較早",
+        },
+        {
+            "participant_id": "P001",
+            "updated_at": "2026-09-11T10:00:00+08:00",
+            "session_number": 2,
+            "memory_status": "fallback",
+            "summary_text": "最新",
+        },
+        {
+            "participant_id": "P002",
+            "updated_at": "2026-09-12T10:00:00+08:00",
+            "session_number": 1,
+            "memory_status": "ready",
+            "summary_text": "其他人",
+        },
+    ]
+
+    latest = store.latest_continuity("P001")
+    assert latest is not None
+    assert latest["summary_text"] == "最新"
+    assert store.latest_continuity("P999") is None
