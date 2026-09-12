@@ -2,38 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import re
 import uuid
 from typing import Any
-
-PIN_PATTERN = re.compile(r"^\d{6}$")
-
-
-def valid_pin(pin: str) -> bool:
-    """續談 PIN 固定為 6 位數，便於學生記憶與輸入。"""
-    return bool(PIN_PATTERN.fullmatch(pin.strip()))
-
-
-def pin_digest(participant_id: str, pin: str) -> str:
-    """只保存不可逆摘要，不保存原始 PIN。
-
-    participant_id 作為每位學習者不同的 salt；PBKDF2 提高離線猜測成本。
-    """
-    salt = f"helping-continuity:{participant_id.strip()}".encode("utf-8")
-    return hashlib.pbkdf2_hmac(
-        "sha256",
-        pin.strip().encode("utf-8"),
-        salt,
-        200_000,
-    ).hex()
-
-
-def pin_matches(participant_id: str, pin: str, expected_digest: str) -> bool:
-    if not expected_digest:
-        return False
-    return hmac.compare_digest(pin_digest(participant_id, pin), str(expected_digest).strip())
 
 
 def recent_context(messages: list[dict[str, Any]], limit: int = 8) -> list[dict[str, str]]:
@@ -88,6 +58,7 @@ def build_memory_record(
         "unresolved_points_json": unresolved,
         "next_opening": next_opening,
         "recent_context_json": recent_context(messages),
-        "pin_hash": session.get("continuity_pin_hash", ""),
+        # 舊版欄位保留以避免既有試算表 schema mismatch；Email OTP 版不再使用固定 PIN。
+        "pin_hash": "",
         "memory_status": status,
     }
