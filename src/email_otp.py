@@ -131,11 +131,11 @@ def send_otp_email(
         )
 
     msg = MIMEText(
-        "同學您好：\n\n"
+        "您好：\n\n"
         f"您的助人技巧訓練 Agent 登入驗證碼為：【 {otp_code} 】\n\n"
         "驗證碼 10 分鐘內有效，且只能使用一次。\n"
         "請勿將驗證碼提供給其他人。\n\n"
-        "祝學習順利！",
+        "祝使用順利！",
         _charset="utf-8",
     )
     msg["Subject"] = "【助人技巧訓練 Agent】登入驗證碼"
