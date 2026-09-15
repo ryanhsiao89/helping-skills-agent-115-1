@@ -19,6 +19,11 @@ from src.email_otp import (
 )
 from src.settings import load_settings
 from src.sheets_store import SheetsStore, SheetsStoreError
+from src.usage_time import (
+    COUNSELOR_TARGET_MINUTES,
+    SEMESTER_TARGET_MINUTES,
+    audited_usage_summary,
+)
 
 st.set_page_config(page_title="教師後台", page_icon="📊", layout="wide")
 
@@ -37,67 +42,64 @@ def csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8-sig")
 
 
-def build_student_usage_summary(roster: pd.DataFrame, sessions: pd.DataFrame) -> pd.DataFrame:
+def build_student_usage_summary(
+    roster: pd.DataFrame,
+    sessions: pd.DataFrame,
+    chat_logs: pd.DataFrame,
+) -> pd.DataFrame:
     columns = [
         "school_email",
         "participant_id",
         "sessions_started",
         "sessions_completed",
+        "counted_sessions",
         "total_minutes",
-        "experience_sessions",
-        "practice_sessions",
+        "counselor_minutes",
+        "experience_minutes",
+        "remaining_total_minutes",
+        "remaining_counselor_minutes",
+        "requirement_met",
         "last_activity",
     ]
     if roster.empty:
         return pd.DataFrame(columns=columns)
 
-    base = roster[["school_email", "participant_id"]].copy()
-    if sessions.empty:
-        for column in (
-            "sessions_started",
-            "sessions_completed",
-            "experience_sessions",
-            "practice_sessions",
-        ):
-            base[column] = 0
-        base["total_minutes"] = 0.0
-        base["last_activity"] = ""
-        return base[columns]
+    session_rows = sessions.to_dict("records") if not sessions.empty else []
+    chat_rows = chat_logs.to_dict("records") if not chat_logs.empty else []
+    records: list[dict] = []
 
-    work = sessions.copy()
-    work["duration_seconds_numeric"] = pd.to_numeric(
-        work["duration_seconds"], errors="coerce"
-    ).fillna(0)
-    work["is_completed"] = work["completion_status"].isin(
-        ["completed", "completed_evaluation_error", "safety_ended"]
-    )
-
-    grouped = (
-        work.groupby("participant_id", dropna=False)
-        .agg(
-            sessions_started=("session_id", "count"),
-            sessions_completed=("is_completed", "sum"),
-            total_seconds=("duration_seconds_numeric", "sum"),
-            experience_sessions=("mode", lambda values: int((values == "experience").sum())),
-            practice_sessions=("mode", lambda values: int((values == "practice").sum())),
-            last_activity=("started_at", "max"),
+    for _, roster_row in roster.iterrows():
+        participant_id = str(roster_row.get("participant_id", "") or "").strip()
+        summary = audited_usage_summary(participant_id, session_rows, chat_rows)
+        participant_sessions = [
+            row
+            for row in session_rows
+            if str(row.get("participant_id", "") or "").strip() == participant_id
+        ]
+        last_activity = max(
+            (str(row.get("started_at", "") or "") for row in participant_sessions),
+            default="",
         )
-        .reset_index()
-    )
-    grouped["total_minutes"] = (grouped["total_seconds"] / 60).round(1)
-    grouped = grouped.drop(columns=["total_seconds"])
+        records.append(
+            {
+                "school_email": str(roster_row.get("school_email", "") or ""),
+                "participant_id": participant_id,
+                "sessions_started": summary.started_sessions,
+                "sessions_completed": summary.completed_sessions,
+                "counted_sessions": summary.counted_sessions,
+                "total_minutes": summary.total_minutes,
+                "counselor_minutes": summary.counselor_minutes,
+                "experience_minutes": summary.experience_minutes,
+                "remaining_total_minutes": summary.remaining_minutes,
+                "remaining_counselor_minutes": summary.remaining_counselor_minutes,
+                "requirement_met": "是" if summary.semester_requirement_met else "否",
+                "last_activity": last_activity,
+            }
+        )
 
-    summary = base.merge(grouped, on="participant_id", how="left")
-    for column in (
-        "sessions_started",
-        "sessions_completed",
-        "experience_sessions",
-        "practice_sessions",
-    ):
-        summary[column] = summary[column].fillna(0).astype(int)
-    summary["total_minutes"] = summary["total_minutes"].fillna(0.0)
-    summary["last_activity"] = summary["last_activity"].fillna("")
-    return summary[columns].sort_values(["school_email", "participant_id"])
+    return pd.DataFrame(records, columns=columns).sort_values(
+        ["school_email", "participant_id"]
+    )
 
 
 def init_teacher_auth_state() -> None:
@@ -356,9 +358,16 @@ metric_columns[2].metric(
 metric_columns[3].metric("逐輪對話數", len(frames["ChatLogs"]))
 metric_columns[4].metric("技巧事件數", len(frames["SkillEvents"]))
 
-student_summary = build_student_usage_summary(frames["StudentRoster"], sessions)
+student_summary = build_student_usage_summary(
+    frames["StudentRoster"],
+    sessions,
+    frames["ChatLogs"],
+)
 st.subheader("學生使用摘要")
-st.caption("供教師快速檢視平時練習參與情形；詳細內容仍以各原始資料表為準。")
+st.caption(
+    f"分鐘數以 Sessions × ChatLogs 交叉稽核計算；學期門檻為總累積至少 {SEMESTER_TARGET_MINUTES} 分鐘，"
+    f"其中學生擔任諮商師至少 {COUNSELOR_TARGET_MINUTES} 分鐘。"
+)
 st.dataframe(student_summary, use_container_width=True, hide_index=True)
 st.download_button(
     "下載學生使用摘要.csv",
