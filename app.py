@@ -35,6 +35,7 @@ from src.prompts import (
 from src.safety import crisis_response, detect_immediate_crisis
 from src.settings import Settings, load_settings
 from src.sheets_store import NullStore, SheetsStore, SheetsStoreError
+from src.usage_time import COUNSELOR_TARGET_MINUTES, SEMESTER_TARGET_MINUTES
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 OWNER_TEST_EMAIL = "ryanhsiao89@gmail.com"
@@ -301,6 +302,7 @@ def start_session(
     prior_memory: dict | None = None,
 ) -> None:
     usage = store.usage_summary(participant_id)
+    audited_before = store.audited_usage_summary(participant_id)
     if mode == "experience":
         stage_start = "full_demo"
         current_stage = "full_demo"
@@ -342,6 +344,8 @@ def start_session(
         "ended_at": "",
         "completion_status": "in_progress",
         "usage_number": usage.started + 1,
+        "usage_total_minutes_before": audited_before.total_minutes,
+        "usage_counselor_minutes_before": audited_before.counselor_minutes,
         "conversation_action": conversation_action if mode == "experience" else "new",
         "conversation_id": conversation_id,
         "parent_session_id": parent_session_id,
@@ -652,6 +656,40 @@ def render_assessment(assessment: dict) -> None:
         st.caption(f"證據限制：{assessment['evidence_limitations']}")
 
 
+def render_usage_progress(store, participant_id: str) -> None:
+    """顯示 Sessions × ChatLogs 交叉稽核後的學期分鐘進度。"""
+    if not getattr(store, "enabled", False):
+        st.info("目前為本機預覽模式，無法計算學期累積分鐘。")
+        return
+    try:
+        usage = store.audited_usage_summary(participant_id)
+    except SheetsStoreError as exc:
+        st.warning(f"目前無法讀取累積上機分鐘：{exc}")
+        return
+
+    st.markdown("#### 本學期上機進度")
+    total_col, counselor_col = st.columns(2)
+    total_col.metric(
+        "累積上機分鐘",
+        f"{usage.total_minutes:.1f} / {SEMESTER_TARGET_MINUTES}",
+    )
+    counselor_col.metric(
+        "其中擔任諮商師",
+        f"{usage.counselor_minutes:.1f} / {COUNSELOR_TARGET_MINUTES}",
+    )
+    st.progress(usage.progress_ratio)
+    st.caption(
+        f"尚需累積 {usage.remaining_minutes:.1f} 分鐘；"
+        f"其中諮商師角色尚需 {usage.remaining_counselor_minutes:.1f} 分鐘。"
+    )
+    if usage.semester_requirement_met:
+        st.success("已達成本學期上機要求：總累積至少 120 分鐘，且諮商師角色至少 60 分鐘。")
+    else:
+        st.caption(
+            "分鐘數以 Sessions 與 ChatLogs 交叉核對；本次練習需完成互動並正式按「結束並查看回饋」後才會更新。"
+        )
+
+
 init_state()
 settings, store, store_error = load_runtime()
 gateway, gateway_error = build_student_gateway(settings)
@@ -805,6 +843,7 @@ if not session:
         f"已驗證：{mask_email(st.session_state.verified_email)}｜"
         f"學習者代碼：{st.session_state.verified_participant_id}"
     )
+    render_usage_progress(store, st.session_state.verified_participant_id)
 
     # 放在 form 外，使切換模式／續談選項時能立即更新相應欄位。
     mode = st.radio(
@@ -977,6 +1016,13 @@ else:
     else:
         top_fourth.metric("本學期第", f"{session.get('usage_number', 1)} 次")
 
+    if not ended:
+        st.caption(
+            f"本次開始前：累積 {session.get('usage_total_minutes_before', 0):.1f}/{SEMESTER_TARGET_MINUTES} 分鐘｜"
+            f"其中擔任諮商師 {session.get('usage_counselor_minutes_before', 0):.1f}/{COUNSELOR_TARGET_MINUTES} 分鐘。"
+            "本次需正式結束後才會計入。"
+        )
+
     caption = f"學習者代碼：{session['participant_id']}｜Session：{session['session_id'][:8]}"
     if session["mode"] == "experience":
         caption += f"｜Conversation：{session.get('conversation_id', '')[:8]}"
@@ -1045,6 +1091,8 @@ else:
                     )
                 st.rerun()
     else:
+        render_usage_progress(store, session["participant_id"])
+
         if st.session_state.assessment:
             render_assessment(st.session_state.assessment)
         elif st.session_state.assessment_error:
