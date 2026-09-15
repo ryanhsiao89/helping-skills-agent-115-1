@@ -14,6 +14,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .constants import SHEET_HEADERS
+from .usage_time import AuditedUsageSummary, audited_usage_summary
 
 SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
@@ -63,6 +64,9 @@ class NullStore:
 
     def usage_summary(self, participant_id: str) -> UsageSummary:
         return UsageSummary()
+
+    def audited_usage_summary(self, participant_id: str) -> AuditedUsageSummary:
+        return AuditedUsageSummary(participant_id=str(participant_id or "").strip())
 
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         return []
@@ -172,6 +176,14 @@ class SheetsStore:
             1 for row in participant_rows if row.get("completion_status") in completed_statuses
         )
         return UsageSummary(started=len(participant_rows), completed=completed)
+
+    def audited_usage_summary(self, participant_id: str) -> AuditedUsageSummary:
+        """以 Sessions 與 ChatLogs 交叉核對後計算學期累積上機時間。"""
+        return audited_usage_summary(
+            participant_id,
+            self.read_all("Sessions"),
+            self.read_all("ChatLogs"),
+        )
 
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
         """取得同一已驗證學生最新一筆已保存的跨次續談記憶。"""
