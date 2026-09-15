@@ -1,6 +1,10 @@
 """以 Sessions 與 ChatLogs 互相勾稽的累積上機時間計算。
 
-原則：
+學期門檻：
+- 總累積至少 120 分鐘。
+- 其中 practice（學生擔任諮商師／助人者）至少 60 分鐘。
+
+稽核原則：
 1. 只計入已正式結束的 session。
 2. Sessions 的 started_at / ended_at / duration_seconds 彼此交叉核對，取較保守值。
 3. ChatLogs 必須至少有一則學生實際輸入，且之後至少有一則 AI 回應。
@@ -16,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 SEMESTER_TARGET_MINUTES = 120
+COUNSELOR_TARGET_MINUTES = 60
 POST_INTERACTION_GRACE_SECONDS = 120
 COUNTABLE_COMPLETION_STATUSES = {
     "completed",
@@ -48,6 +53,7 @@ def _positive_seconds(value: Any) -> float | None:
 class AuditedSessionTime:
     session_id: str
     participant_id: str
+    mode: str
     seconds: int
     counted: bool
     reason: str
@@ -60,20 +66,47 @@ class AuditedUsageSummary:
     completed_sessions: int = 0
     counted_sessions: int = 0
     total_seconds: int = 0
+    counselor_seconds: int = 0
+    experience_seconds: int = 0
 
     @property
     def total_minutes(self) -> float:
         return round(self.total_seconds / 60, 1)
 
     @property
+    def counselor_minutes(self) -> float:
+        return round(self.counselor_seconds / 60, 1)
+
+    @property
+    def experience_minutes(self) -> float:
+        return round(self.experience_seconds / 60, 1)
+
+    @property
     def remaining_minutes(self) -> float:
         return round(max(0.0, SEMESTER_TARGET_MINUTES - self.total_seconds / 60), 1)
 
     @property
+    def remaining_counselor_minutes(self) -> float:
+        return round(max(0.0, COUNSELOR_TARGET_MINUTES - self.counselor_seconds / 60), 1)
+
+    @property
     def progress_ratio(self) -> float:
-        if SEMESTER_TARGET_MINUTES <= 0:
-            return 1.0
         return min(1.0, max(0.0, self.total_seconds / 60 / SEMESTER_TARGET_MINUTES))
+
+    @property
+    def counselor_progress_ratio(self) -> float:
+        return min(1.0, max(0.0, self.counselor_seconds / 60 / COUNSELOR_TARGET_MINUTES))
+
+    @property
+    def semester_requirement_met(self) -> bool:
+        return (
+            self.total_seconds >= SEMESTER_TARGET_MINUTES * 60
+            and self.counselor_seconds >= COUNSELOR_TARGET_MINUTES * 60
+        )
+
+
+def _uncounted(session_id: str, participant_id: str, mode: str, reason: str) -> AuditedSessionTime:
+    return AuditedSessionTime(session_id, participant_id, mode, 0, False, reason)
 
 
 def audit_session_time(
@@ -84,21 +117,22 @@ def audit_session_time(
 
     session_id = str(session.get("session_id", "") or "").strip()
     participant_id = str(session.get("participant_id", "") or "").strip()
+    mode = str(session.get("mode", "") or "").strip()
     status = str(session.get("completion_status", "") or "").strip()
 
     if status not in COUNTABLE_COMPLETION_STATUSES:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "session_not_completed")
+        return _uncounted(session_id, participant_id, mode, "session_not_completed")
 
     started_at = _parse_datetime(session.get("started_at"))
     ended_at = _parse_datetime(session.get("ended_at"))
     if started_at is None or ended_at is None or ended_at <= started_at:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "invalid_session_time")
+        return _uncounted(session_id, participant_id, mode, "invalid_session_time")
 
     wall_seconds = max(0.0, (ended_at - started_at).total_seconds())
     stored_seconds = _positive_seconds(session.get("duration_seconds"))
     session_seconds = min(wall_seconds, stored_seconds) if stored_seconds else wall_seconds
     if session_seconds <= 0:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "zero_session_duration")
+        return _uncounted(session_id, participant_id, mode, "zero_session_duration")
 
     valid_logs: list[tuple[datetime, str]] = []
     for row in chat_logs:
@@ -118,7 +152,7 @@ def audit_session_time(
     valid_logs.sort(key=lambda item: item[0])
     student_times = [timestamp for timestamp, role in valid_logs if role in STUDENT_ROLES]
     if not student_times:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "no_student_turn")
+        return _uncounted(session_id, participant_id, mode, "no_student_turn")
 
     first_student_at = student_times[0]
     ai_replies = [
@@ -127,7 +161,7 @@ def audit_session_time(
         if role in AI_ROLES and timestamp >= first_student_at
     ]
     if not ai_replies:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "no_ai_reply")
+        return _uncounted(session_id, participant_id, mode, "no_ai_reply")
 
     interaction_times = [
         timestamp
@@ -143,8 +177,15 @@ def audit_session_time(
     audited_seconds = int(max(0.0, min(session_seconds, chat_supported_seconds)))
 
     if audited_seconds <= 0:
-        return AuditedSessionTime(session_id, participant_id, 0, False, "no_supported_duration")
-    return AuditedSessionTime(session_id, participant_id, audited_seconds, True, "counted")
+        return _uncounted(session_id, participant_id, mode, "no_supported_duration")
+    return AuditedSessionTime(
+        session_id=session_id,
+        participant_id=participant_id,
+        mode=mode,
+        seconds=audited_seconds,
+        counted=True,
+        reason="counted",
+    )
 
 
 def audited_usage_summary(
@@ -152,7 +193,7 @@ def audited_usage_summary(
     sessions: Iterable[dict[str, Any]],
     chat_logs: Iterable[dict[str, Any]],
 ) -> AuditedUsageSummary:
-    """彙整一位學生的學期累積上機時間。"""
+    """彙整一位學生的學期累積上機時間，並分列學生擔任諮商師與個案的分鐘數。"""
 
     participant_id = str(participant_id or "").strip()
     session_rows = [
@@ -170,6 +211,8 @@ def audited_usage_summary(
     )
     audited = [audit_session_time(row, chat_rows) for row in session_rows]
     counted = [item for item in audited if item.counted]
+    counselor_seconds = sum(item.seconds for item in counted if item.mode == "practice")
+    experience_seconds = sum(item.seconds for item in counted if item.mode == "experience")
 
     return AuditedUsageSummary(
         participant_id=participant_id,
@@ -177,4 +220,6 @@ def audited_usage_summary(
         completed_sessions=completed_sessions,
         counted_sessions=len(counted),
         total_seconds=sum(item.seconds for item in counted),
+        counselor_seconds=counselor_seconds,
+        experience_seconds=experience_seconds,
     )
