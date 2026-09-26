@@ -67,6 +67,11 @@ def _friendly_sheet_error(action: str, exc: Exception) -> str:
             f"{action}：Google Sheets 服務暫時不穩定（{status}）。"
             "系統已自動重試仍未成功，請稍後再試。"
         )
+    if status in {401, 403}:
+        return (
+            f"{action}：Google Sheets 權限驗證失敗（{status}）。"
+            "請教師確認 Streamlit Secrets 的服務帳戶設定，以及試算表是否仍分享給該服務帳戶。"
+        )
     return action
 
 
