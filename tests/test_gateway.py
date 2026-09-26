@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from src.gemini_gateway import GeminiGateway
+import pytest
+
+from src.gemini_gateway import GeminiGateway, GatewayError
 
 
 class FakeInteractions:
@@ -33,3 +35,33 @@ def test_dialogue_request_is_stateless_and_uses_thinking_level_for_gemini_3(monk
     assert fake.interactions.kwargs["generation_config"]["thinking_level"] == "low"
     assert "temperature" not in fake.interactions.kwargs["generation_config"]
     assert "extra_body" not in fake.interactions.kwargs
+    assert fake.interactions.kwargs["timeout"] == 45.0
+
+
+class TimeoutInteractions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        raise TimeoutError("request timed out")
+
+
+class TimeoutClient:
+    def __init__(self):
+        self.interactions = TimeoutInteractions()
+
+
+def test_dialogue_timeout_stops_without_duplicate_config_retry(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.8-flash")
+    fake = TimeoutClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+
+    with pytest.raises(GatewayError, match="等待超過 45 秒"):
+        gateway.generate_text(
+            prompt="hello",
+            system_instruction="system",
+            temperature=0.35,
+        )
+
+    assert fake.interactions.calls == 1
