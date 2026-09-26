@@ -70,6 +70,29 @@ def _safe_error_detail(exc: Exception | None) -> str:
     return " | ".join(labels)
 
 
+def _friendly_gateway_error(exc: Exception | None, *, structured: bool = False) -> str:
+    """把常見 Gemini 錯誤轉成學生可直接採取行動的訊息。"""
+    raw = str(exc or "")
+    upper = raw.upper()
+    if "API_KEY_INVALID" in upper or "API KEY NOT VALID" in upper:
+        return (
+            "Gemini API Key 無效。請回到 Google AI Studio 重新建立或複製有效的 API Key，"
+            "再重新開始本次練習；請勿輸入一般 Google 帳號密碼。"
+        )
+    if "RESOURCE_EXHAUSTED" in upper or "QUOTA" in upper or "429" in upper:
+        return (
+            "Gemini API 暫時達到使用額度或速率上限。請稍候再試；"
+            "若持續發生，請到 Google AI Studio 檢查該 API Key 的可用額度。"
+        )
+    if "PERMISSION_DENIED" in upper or "403" in upper:
+        return (
+            "這把 Gemini API Key 目前沒有使用此模型的權限。"
+            "請到 Google AI Studio 檢查專案／API Key，或重新建立一把可用的 Key。"
+        )
+    prefix = "晤談後回饋產生失敗。" if structured else "Gemini API 呼叫失敗。"
+    return prefix + "安全診斷：" + _safe_error_detail(exc)
+
+
 class GeminiGateway:
     def __init__(self, api_keys: tuple[str, ...], model_name: str):
         self.api_keys = tuple(key.strip() for key in api_keys if key and key.strip())
@@ -167,8 +190,9 @@ class GeminiGateway:
                 finally:
                     self._close_client(client)
 
-        detail = _safe_error_detail(last_error)
-        raise GatewayError("Gemini API 呼叫失敗。安全診斷：" + detail) from last_error
+        raise GatewayError(
+            _friendly_gateway_error(last_error, structured=False)
+        ) from last_error
 
     def generate_structured(
         self,
@@ -227,5 +251,6 @@ class GeminiGateway:
                 finally:
                     self._close_client(client)
 
-        detail = _safe_error_detail(last_error)
-        raise GatewayError("晤談後回饋產生失敗。安全診斷：" + detail) from last_error
+        raise GatewayError(
+            _friendly_gateway_error(last_error, structured=True)
+        ) from last_error
