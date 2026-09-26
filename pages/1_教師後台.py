@@ -20,6 +20,7 @@ from src.email_otp import (
 from src.settings import load_settings
 from src.sheets_store import SheetsStore, SheetsStoreError
 from src.usage_time import (
+    COUNTABLE_COMPLETION_STATUSES,
     COUNSELOR_TARGET_MINUTES,
     SEMESTER_TARGET_MINUTES,
     audited_usage_summary,
@@ -351,7 +352,7 @@ metric_columns[0].metric("已驗證學生", len(frames["StudentRoster"]))
 metric_columns[1].metric("Session 數", len(sessions))
 metric_columns[2].metric(
     "完成數",
-    int(sessions["completion_status"].isin(["completed", "completed_evaluation_error"]).sum())
+    int(sessions["completion_status"].isin(COUNTABLE_COMPLETION_STATUSES).sum())
     if not sessions.empty
     else 0,
 )
