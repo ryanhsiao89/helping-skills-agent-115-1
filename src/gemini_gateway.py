@@ -16,6 +16,9 @@ from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 
+DIALOGUE_REQUEST_TIMEOUT_SECONDS = 45.0
+STRUCTURED_REQUEST_TIMEOUT_SECONDS = 75.0
+
 
 class GatewayError(RuntimeError):
     """對外只顯示已去識別的供應商錯誤診斷，不暴露 API Key。"""
@@ -74,6 +77,17 @@ def _friendly_gateway_error(exc: Exception | None, *, structured: bool = False) 
     """把常見 Gemini 錯誤轉成學生可直接採取行動的訊息。"""
     raw = str(exc or "")
     upper = raw.upper()
+    error_name = type(exc).__name__.upper() if exc is not None else ""
+    if "TIMEOUT" in error_name or "TIMEOUT" in upper or "TIMED OUT" in upper:
+        if structured:
+            return (
+                "AI 督導回饋等待超過 75 秒，系統已停止等待。"
+                "本次 Session 與可認列的上機分鐘會先保存；你仍可下載逐字稿或開始另一段練習。"
+            )
+        return (
+            "AI 回應等待超過 45 秒，系統已停止等待。"
+            "請確認網路後稍候再送出一次；不需要連續重複送出。"
+        )
     if "API_KEY_INVALID" in upper or "API KEY NOT VALID" in upper:
         return (
             "Gemini API Key 無效。請回到 Google AI Studio 重新建立或複製有效的 API Key，"
@@ -121,6 +135,21 @@ class GeminiGateway:
     def _is_gemini_3(model_name: str) -> bool:
         return model_name.startswith("gemini-3")
 
+    @staticmethod
+    def _is_generation_config_compat_error(exc: Exception) -> bool:
+        """只有在取樣／thinking 設定不相容時，才改用無 generation_config 重試。"""
+        text = f"{type(exc).__name__} {exc}".lower()
+        markers = (
+            "thinking_level",
+            "thinking level",
+            "generation_config",
+            "generation config",
+            "temperature",
+            "unknown field",
+            "unexpected keyword",
+        )
+        return any(marker in text for marker in markers)
+
     def _generation_configs(
         self,
         *,
@@ -151,6 +180,7 @@ class GeminiGateway:
         system_instruction: str,
         temperature: float,
         thinking_level: str = "low",
+        timeout_seconds: float = DIALOGUE_REQUEST_TIMEOUT_SECONDS,
     ) -> TextResult:
         last_error: Exception | None = None
 
@@ -178,15 +208,23 @@ class GeminiGateway:
                     # 若直接 self._client(...).interactions.create(...)，google-genai
                     # 可能在鏈式呼叫期間回收暫時 Client，導致 httpx client 提前關閉。
                     client = self._client(api_key)
-                    response = client.interactions.create(**request)
+                    response = client.interactions.create(
+                        **request,
+                        timeout=timeout_seconds,
+                    )
                     text = (response.output_text or "").strip()
                     if not text:
                         raise ValueError("模型回傳空白內容")
 
                     latency = int((time.perf_counter() - started) * 1000)
                     return TextResult(text=text, latency_ms=latency, key_slot=index)
-                except Exception as exc:  # SDK 錯誤型別會隨版本擴充；統一重試/輪替 Key。
+                except Exception as exc:  # SDK 錯誤型別會隨版本擴充；統一轉成安全訊息。
                     last_error = exc
+                    # 無設定重試只處理 generation_config 相容性，不對 timeout、無效 Key、
+                    # quota 等錯誤再做一次同樣的長等待。
+                    if generation_config is not None and self._is_generation_config_compat_error(exc):
+                        continue
+                    break
                 finally:
                     self._close_client(client)
 
@@ -202,6 +240,7 @@ class GeminiGateway:
         temperature: float,
         schema: type[T],
         model_name: str | None = None,
+        timeout_seconds: float = STRUCTURED_REQUEST_TIMEOUT_SECONDS,
     ) -> StructuredResult:
         selected_model = (model_name or self.model_name).strip()
         last_error: Exception | None = None
@@ -234,7 +273,10 @@ class GeminiGateway:
 
                     # 與 generate_text 相同，避免暫時 Client 被提早回收／關閉。
                     client = self._client(api_key)
-                    response = client.interactions.create(**request)
+                    response = client.interactions.create(
+                        **request,
+                        timeout=timeout_seconds,
+                    )
                     raw_text = (response.output_text or "").strip()
                     parsed = schema.model_validate_json(raw_text)
                     latency = int((time.perf_counter() - started) * 1000)
@@ -246,8 +288,14 @@ class GeminiGateway:
                     )
                 except (ValidationError, ValueError, TypeError) as exc:
                     last_error = exc
+                    if generation_config is not None and self._is_generation_config_compat_error(exc):
+                        continue
+                    break
                 except Exception as exc:
                     last_error = exc
+                    if generation_config is not None and self._is_generation_config_compat_error(exc):
+                        continue
+                    break
                 finally:
                     self._close_client(client)
 
