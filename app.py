@@ -393,15 +393,35 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
     if not session or session.get("ended_at"):
         return
 
+    # 先把 Session 正式結束時間保存，再產生 AI 回饋。
+    # 這樣即使 Gemini 回饋逾時或後續評量寫入失敗，本次可稽核的上機分鐘仍有機會被保留。
+    ended_at = now_iso()
+    session["ended_at"] = ended_at
+    session["completion_status"] = "completed_evaluation_pending"
+    st.session_state.assessment_error = ""
+    try:
+        store.update_session(
+            session["session_id"],
+            build_session_record(
+                session,
+                status="completed_evaluation_pending",
+                ended_at=ended_at,
+            ),
+        )
+    except SheetsStoreError as exc:
+        st.session_state.logging_error = str(exc)
+
     assessment_status = "completed"
     assessment_id = str(uuid.uuid4())
-    created_at = now_iso()
+    created_at = ended_at
     continuity_for_memory: dict | None = None
     memory_status = "fallback"
 
     if gateway is None:
         assessment_status = "completed_evaluation_error"
-        st.session_state.assessment_error = "尚未設定 Gemini API，無法產生晤談後回饋。"
+        st.session_state.assessment_error = (
+            "本次 Session 已結束，但目前沒有可用的 Gemini API Key，因此未產生 AI 督導回饋。"
+        )
     else:
         try:
             result = gateway.generate_structured(
@@ -411,60 +431,10 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                 schema=AssessmentResult,
                 model_name=settings.evaluator_model_name,
             )
-            parsed = result.parsed.model_dump()
-            st.session_state.assessment = parsed
-            continuity_for_memory = parsed.get("continuity") or None
-            memory_status = "ready"
-
-            quoted_examples = [
-                {
-                    "evidence_quote": point["evidence_quote"],
-                    "alternative_response": point.get("alternative_response", ""),
-                }
-                for point in parsed["strengths"] + parsed["improvement_points"]
-            ]
-            store.append_record(
-                "Assessments",
-                {
-                    "assessment_id": assessment_id,
-                    "session_id": session["session_id"],
-                    "rubric_version": settings.rubric_version,
-                    "created_at": created_at,
-                    "dimension_scores_json": {},
-                    "stage_judgment": parsed["stage_judgment"],
-                    "strengths_json": parsed["strengths"],
-                    "improvement_points_json": parsed["improvement_points"],
-                    "quoted_examples_json": quoted_examples,
-                    "next_tasks_json": parsed["next_practice_tasks"],
-                    "raw_model_output": result.raw_text,
-                    "parsed_json": parsed,
-                    "evaluator_model": settings.evaluator_model_name,
-                    "evaluator_temperature": settings.evaluator_temperature,
-                    "status": "success",
-                },
-            )
-            for event in parsed["technique_events"]:
-                store.append_record(
-                    "SkillEvents",
-                    {
-                        "skill_event_id": str(uuid.uuid4()),
-                        "session_id": session["session_id"],
-                        "assessment_id": assessment_id,
-                        "technique": event["technique"],
-                        "category": event["category"],
-                        "evidence_quote": event["evidence_quote"],
-                        "quality": event["quality"],
-                        "rationale": event["rationale"],
-                        "effect": event["effect"],
-                        "alternative_response": event.get("alternative_response", ""),
-                        "created_at": created_at,
-                        "evaluator_model": settings.evaluator_model_name,
-                        "rubric_version": settings.rubric_version,
-                    },
-                )
-        except (GatewayError, SheetsStoreError) as exc:
+        except GatewayError as exc:
             assessment_status = "completed_evaluation_error"
             st.session_state.assessment_error = str(exc)
+            # 評量失敗本身也盡量留下紀錄；若 Sheets 暫時不可用，不阻塞 Session 結束。
             try:
                 store.append_record(
                     "Assessments",
@@ -486,8 +456,65 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                         "status": "error",
                     },
                 )
-            except SheetsStoreError:
-                pass
+            except SheetsStoreError as sheet_exc:
+                st.session_state.logging_error = str(sheet_exc)
+        else:
+            parsed = result.parsed.model_dump()
+            # AI 回饋先呈現在學生畫面；即使後續 Sheets 寫入失敗，也不丟掉已成功取得的回饋。
+            st.session_state.assessment = parsed
+            continuity_for_memory = parsed.get("continuity") or None
+            memory_status = "ready"
+
+            quoted_examples = [
+                {
+                    "evidence_quote": point["evidence_quote"],
+                    "alternative_response": point.get("alternative_response", ""),
+                }
+                for point in parsed["strengths"] + parsed["improvement_points"]
+            ]
+            try:
+                store.append_record(
+                    "Assessments",
+                    {
+                        "assessment_id": assessment_id,
+                        "session_id": session["session_id"],
+                        "rubric_version": settings.rubric_version,
+                        "created_at": created_at,
+                        "dimension_scores_json": {},
+                        "stage_judgment": parsed["stage_judgment"],
+                        "strengths_json": parsed["strengths"],
+                        "improvement_points_json": parsed["improvement_points"],
+                        "quoted_examples_json": quoted_examples,
+                        "next_tasks_json": parsed["next_practice_tasks"],
+                        "raw_model_output": result.raw_text,
+                        "parsed_json": parsed,
+                        "evaluator_model": settings.evaluator_model_name,
+                        "evaluator_temperature": settings.evaluator_temperature,
+                        "status": "success",
+                    },
+                )
+                for event in parsed["technique_events"]:
+                    store.append_record(
+                        "SkillEvents",
+                        {
+                            "skill_event_id": str(uuid.uuid4()),
+                            "session_id": session["session_id"],
+                            "assessment_id": assessment_id,
+                            "technique": event["technique"],
+                            "category": event["category"],
+                            "evidence_quote": event["evidence_quote"],
+                            "quality": event["quality"],
+                            "rationale": event["rationale"],
+                            "effect": event["effect"],
+                            "alternative_response": event.get("alternative_response", ""),
+                            "created_at": created_at,
+                            "evaluator_model": settings.evaluator_model_name,
+                            "rubric_version": settings.rubric_version,
+                        },
+                    )
+            except SheetsStoreError as exc:
+                # 不把「寫入評量表失敗」誤判成「AI 回饋失敗」；學生仍可看到已產生的回饋。
+                st.session_state.logging_error = str(exc)
 
     # 只有學生主動選擇保留／續談時才保存跨日記憶。
     if session.get("mode") == "experience" and session.get("retain_for_continuity"):
@@ -502,17 +529,19 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
         except SheetsStoreError as exc:
             st.session_state.logging_error = str(exc)
 
-    ended_at = now_iso()
-    session["ended_at"] = ended_at
     session["completion_status"] = assessment_status
     try:
         store.update_session(
             session["session_id"],
-            build_session_record(session, status=assessment_status, ended_at=ended_at),
+            build_session_record(
+                session,
+                status=assessment_status,
+                ended_at=ended_at,
+            ),
         )
     except SheetsStoreError as exc:
+        # 若前面的 pending 狀態已寫入成功，使用時間仍可被稽核；此處只提示教師留意。
         st.session_state.logging_error = str(exc)
-
 
 def safety_end(store) -> None:
     session = st.session_state.active_session
@@ -1060,9 +1089,15 @@ else:
             controls[0].empty()
 
         if controls[1].button("結束並查看回饋", type="primary", use_container_width=True):
-            spinner_text = "正在根據逐字稿產生形成性回饋……"
+            spinner_text = (
+                "正在先保存本次 Session，再產生 AI 督導式形成性回饋"
+                "（AI 回饋最長約 75 秒）……"
+            )
             if session.get("mode") == "experience" and session.get("retain_for_continuity"):
-                spinner_text = "正在根據逐字稿產生形成性回饋並建立續談摘要……"
+                spinner_text = (
+                    "正在先保存本次 Session，再產生 AI 督導式形成性回饋與續談摘要"
+                    "（AI 回饋最長約 75 秒）……"
+                )
             with st.spinner(spinner_text):
                 finish_session(settings, store, gateway)
             st.rerun()
