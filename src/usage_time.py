@@ -24,6 +24,7 @@ COUNSELOR_TARGET_MINUTES = 60
 POST_INTERACTION_GRACE_SECONDS = 120
 COUNTABLE_COMPLETION_STATUSES = {
     "completed",
+    "completed_evaluation_pending",
     "completed_evaluation_error",
     "safety_ended",
 }
