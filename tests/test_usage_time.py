@@ -119,3 +119,24 @@ def test_unfinished_session_is_not_counted_even_with_chat_logs():
 
     assert result.counted is False
     assert result.reason == "session_not_completed"
+
+
+def test_feedback_pending_session_still_counts_saved_minutes():
+    session = _session(
+        "S1",
+        "practice",
+        "2026-09-15T10:00:00+08:00",
+        "2026-09-15T10:10:00+08:00",
+        seconds=600,
+    )
+    session["completion_status"] = "completed_evaluation_pending"
+    result = audit_session_time(
+        session,
+        [
+            _chat("S1", "student_counselor", "2026-09-15T10:00:30+08:00"),
+            _chat("S1", "ai_client", "2026-09-15T10:09:00+08:00"),
+        ],
+    )
+
+    assert result.counted is True
+    assert result.seconds > 0
