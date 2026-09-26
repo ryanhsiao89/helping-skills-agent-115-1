@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +21,53 @@ SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 )
+
+SHEETS_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+SHEETS_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0)
+
+
+def _status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    if value is None:
+        value = getattr(exc, "status_code", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_with_retry(operation):
+    """對 Google Sheets 429/5xx 做短暫指數退避，降低多人同時使用時的瞬斷。"""
+    last_error: Exception | None = None
+    attempts = len(SHEETS_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            status = _status_code(exc)
+            if status not in SHEETS_RETRYABLE_STATUS_CODES or attempt >= attempts - 1:
+                raise
+            time.sleep(SHEETS_RETRY_DELAYS_SECONDS[attempt])
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Google Sheets operation failed without an exception")
+
+
+def _friendly_sheet_error(action: str, exc: Exception) -> str:
+    status = _status_code(exc)
+    if status == 429:
+        return (
+            f"{action}：Google Sheets 暫時達到流量上限（429）。"
+            "系統已自動重試仍未成功，請稍候約 30–60 秒再試。"
+        )
+    if status in {500, 502, 503, 504}:
+        return (
+            f"{action}：Google Sheets 服務暫時不穩定（{status}）。"
+            "系統已自動重試仍未成功，請稍後再試。"
+        )
+    return action
 
 
 class SheetsStoreError(RuntimeError):
@@ -136,35 +184,48 @@ class SheetsStore:
     def _worksheet(self, sheet_name: str):
         if sheet_name not in SHEET_HEADERS:
             raise KeyError(f"未知工作表：{sheet_name}")
-        return self.spreadsheet.worksheet(sheet_name)
+        return _run_with_retry(lambda: self.spreadsheet.worksheet(sheet_name))
 
     def append_record(self, sheet_name: str, record: dict[str, Any]) -> None:
         headers = SHEET_HEADERS[sheet_name]
         row = [_cell_value(record.get(header, "")) for header in headers]
         try:
-            self._worksheet(sheet_name).append_row(row, value_input_option="RAW")
+            worksheet = self._worksheet(sheet_name)
+            _run_with_retry(
+                lambda: worksheet.append_row(row, value_input_option="RAW")
+            )
         except Exception as exc:
-            raise SheetsStoreError(f"寫入 {sheet_name} 失敗。") from exc
+            raise SheetsStoreError(
+                _friendly_sheet_error(f"寫入 {sheet_name} 失敗", exc)
+            ) from exc
 
     def update_session(self, session_id: str, record: dict[str, Any]) -> None:
         headers = SHEET_HEADERS["Sessions"]
         worksheet = self._worksheet("Sessions")
         try:
-            identifiers = worksheet.col_values(1)
+            identifiers = _run_with_retry(lambda: worksheet.col_values(1))
             row_number = identifiers.index(session_id) + 1
         except ValueError as exc:
             raise SheetsStoreError(f"找不到 session_id：{session_id}") from exc
+        except Exception as exc:
+            raise SheetsStoreError(
+                _friendly_sheet_error("讀取 Sessions 失敗", exc)
+            ) from exc
 
         values = [_cell_value(record.get(header, "")) for header in headers]
         end_column = _column_letter(len(headers))
         try:
-            worksheet.update(
-                values=[values],
-                range_name=f"A{row_number}:{end_column}{row_number}",
-                value_input_option="RAW",
+            _run_with_retry(
+                lambda: worksheet.update(
+                    values=[values],
+                    range_name=f"A{row_number}:{end_column}{row_number}",
+                    value_input_option="RAW",
+                )
             )
         except Exception as exc:
-            raise SheetsStoreError("更新 Session 結束資訊失敗。") from exc
+            raise SheetsStoreError(
+                _friendly_sheet_error("更新 Session 結束資訊失敗", exc)
+            ) from exc
 
     def usage_summary(self, participant_id: str) -> UsageSummary:
         records = self.read_all("Sessions")
@@ -240,12 +301,22 @@ class SheetsStore:
         return record
 
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
+        worksheet = self._worksheet(sheet_name)
         try:
-            return self._worksheet(sheet_name).get_all_records(
-                expected_headers=SHEET_HEADERS[sheet_name]
+            return _run_with_retry(
+                lambda: worksheet.get_all_records(
+                    expected_headers=SHEET_HEADERS[sheet_name]
+                )
             )
         except TypeError:
             # 舊版 gspread 沒有 expected_headers 參數時仍可讀取。
-            return self._worksheet(sheet_name).get_all_records()
+            try:
+                return _run_with_retry(lambda: worksheet.get_all_records())
+            except Exception as exc:
+                raise SheetsStoreError(
+                    _friendly_sheet_error(f"讀取 {sheet_name} 失敗", exc)
+                ) from exc
         except Exception as exc:
-            raise SheetsStoreError(f"讀取 {sheet_name} 失敗。") from exc
+            raise SheetsStoreError(
+                _friendly_sheet_error(f"讀取 {sheet_name} 失敗", exc)
+            ) from exc
