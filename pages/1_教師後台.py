@@ -29,7 +29,7 @@ from src.usage_time import (
 st.set_page_config(page_title="教師後台", page_icon="📊", layout="wide")
 
 # 教師後台 Email 授權採精確白名單，不因同網域而自動取得教師權限。
-AUTHORIZED_TEACHER_EMAILS = ("plharn@hcu.edu.tw",)
+AUTHORIZED_TEACHER_EMAILS = ("plharn@hcu.edu.tw", "ryanhsiao89@gmail.com")
 
 
 @st.cache_resource(show_spinner=False)
