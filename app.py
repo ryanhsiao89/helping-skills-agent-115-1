@@ -965,7 +965,12 @@ if not session:
             )
 
         agreed = st.checkbox("我了解這是教學模擬，並同意不輸入可識別的真實個案資料。")
-        submitted = st.form_submit_button("開始練習", type="primary", use_container_width=True)
+        st.caption("開始前會先驗證 Gemini API Key 是否真的可呼叫模型；驗證失敗不會建立 Session。")
+        submitted = st.form_submit_button(
+            "驗證 API Key 並開始練習",
+            type="primary",
+            use_container_width=True,
+        )
 
     if submitted:
         errors: list[str] = []
@@ -1005,6 +1010,22 @@ if not session:
                 errors.append(
                     f"Gemini API Key 無法使用：{gateway_error or '請確認 API Key 是否正確。'}"
                 )
+            else:
+                try:
+                    with st.spinner("正在驗證 Gemini API Key 是否可用……"):
+                        gateway.generate_text(
+                            prompt="請只回覆 OK。",
+                            system_instruction="這是 API Key 連線測試。只回覆 OK，不要加入其他內容。",
+                            temperature=0.0,
+                            thinking_level="low",
+                            timeout_seconds=15.0,
+                        )
+                except GatewayError as exc:
+                    errors.append(f"Gemini API Key 驗證失敗：{exc}")
+                    # 驗證失敗即清掉目前 Key，避免側欄誤顯示成已可使用。
+                    st.session_state.student_api_key = ""
+                    gateway = None
+                    gateway_error = str(exc)
 
         if errors:
             if gateway is None:
