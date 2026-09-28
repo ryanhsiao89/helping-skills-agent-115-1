@@ -73,19 +73,29 @@ def _safe_error_detail(exc: Exception | None) -> str:
     return " | ".join(labels)
 
 
-def _friendly_gateway_error(exc: Exception | None, *, structured: bool = False) -> str:
+def _friendly_gateway_error(
+    exc: Exception | None,
+    *,
+    structured: bool = False,
+    timeout_seconds: float | None = None,
+) -> str:
     """把常見 Gemini 錯誤轉成學生可直接採取行動的訊息。"""
     raw = str(exc or "")
     upper = raw.upper()
     error_name = type(exc).__name__.upper() if exc is not None else ""
     if "TIMEOUT" in error_name or "TIMEOUT" in upper or "TIMED OUT" in upper:
+        timeout_label = (
+            f"{int(timeout_seconds)} 秒"
+            if timeout_seconds is not None
+            else ("75 秒" if structured else "45 秒")
+        )
         if structured:
             return (
-                "AI 督導回饋等待超過 75 秒，系統已停止等待。"
+                f"AI 督導回饋等待超過 {timeout_label}，系統已停止等待。"
                 "本次 Session 與可認列的上機分鐘會先保存；你仍可下載逐字稿或開始另一段練習。"
             )
         return (
-            "AI 回應等待超過 45 秒，系統已停止等待。"
+            f"AI 回應等待超過 {timeout_label}，系統已停止等待。"
             "請確認網路後稍候再送出一次；不需要連續重複送出。"
         )
     if "API_KEY_INVALID" in upper or "API KEY NOT VALID" in upper:
@@ -229,7 +239,11 @@ class GeminiGateway:
                     self._close_client(client)
 
         raise GatewayError(
-            _friendly_gateway_error(last_error, structured=False)
+            _friendly_gateway_error(
+                last_error,
+                structured=False,
+                timeout_seconds=timeout_seconds,
+            )
         ) from last_error
 
     def generate_structured(
@@ -300,5 +314,9 @@ class GeminiGateway:
                     self._close_client(client)
 
         raise GatewayError(
-            _friendly_gateway_error(last_error, structured=True)
+            _friendly_gateway_error(
+                last_error,
+                structured=True,
+                timeout_seconds=timeout_seconds,
+            )
         ) from last_error
