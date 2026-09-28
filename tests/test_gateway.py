@@ -65,3 +65,20 @@ def test_dialogue_timeout_stops_without_duplicate_config_retry(monkeypatch):
         )
 
     assert fake.interactions.calls == 1
+
+
+
+def test_custom_timeout_message_uses_requested_seconds(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.8-flash")
+    fake = TimeoutClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+
+    with pytest.raises(GatewayError, match="等待超過 15 秒"):
+        gateway.generate_text(
+            prompt="請只回覆 OK。",
+            system_instruction="只回覆 OK。",
+            temperature=0.0,
+            timeout_seconds=15.0,
+        )
+
+    assert fake.interactions.calls == 1
