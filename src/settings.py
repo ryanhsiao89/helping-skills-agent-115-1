@@ -46,6 +46,7 @@ class Settings:
     gemini_api_keys: tuple[str, ...]
     model_name: str
     evaluator_model_name: str
+    evaluator_fallback_model_name: str
     dialogue_temperature: float
     evaluator_temperature: float
     prompt_version: str
@@ -134,14 +135,27 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         domains = _as_tuple(email_cfg.get("school_domains", ()))
     domains = tuple(item.lower().lstrip("@") for item in domains)
 
+    # 2026-09 起將大量逐輪對話固定改用 Flash Lite，避免舊 Secrets 內的
+    # MODEL_NAME="gemini-3.8-flash" 繼續把每一輪都送到每日額度較低的模型。
+    # 若日後要覆寫逐輪模型，請使用新的 DIALOGUE_MODEL_NAME。
+    dialogue_model_name = str(
+        _value(secrets, "DIALOGUE_MODEL_NAME", "gemini-3.5-flash-lite")
+        or "gemini-3.5-flash-lite"
+    ).strip()
+    evaluator_model_name = str(
+        _value(secrets, "EVALUATOR_MODEL_NAME", "gemini-3.8-flash")
+        or "gemini-3.8-flash"
+    ).strip()
+    evaluator_fallback_model_name = str(
+        _value(secrets, "EVALUATOR_FALLBACK_MODEL_NAME", dialogue_model_name)
+        or dialogue_model_name
+    ).strip()
+
     return Settings(
         gemini_api_keys=(),
-        model_name=str(_value(secrets, "MODEL_NAME", "gemini-3.8-flash")),
-        evaluator_model_name=str(
-            _value(
-                secrets, "EVALUATOR_MODEL_NAME", _value(secrets, "MODEL_NAME", "gemini-3.8-flash")
-            )
-        ),
+        model_name=dialogue_model_name,
+        evaluator_model_name=evaluator_model_name,
+        evaluator_fallback_model_name=evaluator_fallback_model_name,
         dialogue_temperature=float(_value(secrets, "DIALOGUE_TEMPERATURE", 0.35)),
         evaluator_temperature=float(_value(secrets, "EVALUATOR_TEMPERATURE", 0.0)),
         prompt_version=str(_value(secrets, "PROMPT_VERSION", PROMPT_VERSION_DEFAULT)),
