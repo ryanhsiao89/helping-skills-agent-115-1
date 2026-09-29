@@ -21,7 +21,7 @@
 - 續談只把前次摘要、尚未談完重點與最後數輪送給 Gemini，不反覆塞入整份歷史逐字稿。
 - 實作模式：學生當助人者，AI 扮演虛構標準化個案。
 - 完整三階段或單一階段練習。
-- 對話生成與晤談後評量使用獨立模型呼叫：逐輪對話預設使用 Gemini 3.5 Flash Lite；AI 督導優先使用 Gemini 3.8 Flash，遇到 quota / 429 時自動降級至 Gemini 3.5 Flash Lite。
+- 對話生成與晤談後評量仍為獨立呼叫，但兩者目前都使用 Gemini 3.5 Flash Lite，以提高每日可用次數並降低 3.8 Flash 額度／尖峰服務錯誤對課堂使用的影響。
 - 每位學生自行輸入自己的 Gemini API Key；Key 不寫入 Google Sheets、逐字稿或評量紀錄。
 - 完整逐字稿下載：學生可自行保存本次 `.txt` 逐字稿供課後反思。
 - 教師後台提供每位學生的 Session 次數、完成次數、總練習分鐘數、體驗／實作次數與最近活動時間摘要。
@@ -100,8 +100,7 @@ Gemini API Key 不放在教師端 Secrets；由每位學生自行輸入。
 
 ```toml
 DIALOGUE_MODEL_NAME = "gemini-3.5-flash-lite"
-EVALUATOR_MODEL_NAME = "gemini-3.8-flash"
-EVALUATOR_FALLBACK_MODEL_NAME = "gemini-3.5-flash-lite"
+SUPERVISOR_MODEL_NAME = "gemini-3.5-flash-lite"
 DIALOGUE_TEMPERATURE = 0.35
 EVALUATOR_TEMPERATURE = 0.0
 
@@ -135,7 +134,7 @@ smtp_port = 465
 注意：
 
 - 逐輪對話使用 `DIALOGUE_MODEL_NAME`；舊版 `MODEL_NAME` 不再控制學生對話模型，以避免舊 Secrets 仍把每一輪送到 Gemini 3.8 Flash。
-- AI 督導先使用 `EVALUATOR_MODEL_NAME`；只有遇到 quota / 429 才切換 `EVALUATOR_FALLBACK_MODEL_NAME`，API Key 無效等錯誤不會誤切換。
+- AI 督導使用 `SUPERVISOR_MODEL_NAME`；目前預設同樣為 Gemini 3.5 Flash Lite。舊版 `EVALUATOR_MODEL_NAME` 不再控制正式督導模型，以避免舊 Secrets 仍指向 Gemini 3.8 Flash。
 - `email.password` 應使用 Google App Password，不要把一般 Gmail 密碼寫入程式碼。
 - 真實 Secrets 只放在 Streamlit Community Cloud 的 App settings，不可 commit 到 GitHub。
 - `SCHOOL_EMAIL_DOMAINS` 可放一個或多個允許網域，例如 `["school.edu.tw", "student.school.edu.tw"]`。
