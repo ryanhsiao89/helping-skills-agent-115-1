@@ -37,6 +37,7 @@ class StructuredResult:
     raw_text: str
     latency_ms: int
     key_slot: int
+    model_name: str
 
 
 def _safe_error_detail(exc: Exception | None) -> str:
@@ -160,6 +161,23 @@ class GeminiGateway:
         )
         return any(marker in text for marker in markers)
 
+    @staticmethod
+    def _is_quota_error(exc: Exception) -> bool:
+        """判斷是否為可改用較高額度備援模型的 quota/rate-limit 錯誤。"""
+        status_values = {
+            str(getattr(exc, attr, "") or "").strip()
+            for attr in ("status_code", "code", "status")
+        }
+        text = f"{type(exc).__name__} {exc}".upper()
+        return (
+            "429" in status_values
+            or "429" in text
+            or "RESOURCE_EXHAUSTED" in text
+            or "QUOTA" in text
+            or "RATE LIMIT" in text
+            or "RATE_LIMIT" in text
+        )
+
     def _generation_configs(
         self,
         *,
@@ -254,64 +272,91 @@ class GeminiGateway:
         temperature: float,
         schema: type[T],
         model_name: str | None = None,
+        fallback_model_name: str | None = None,
         timeout_seconds: float = STRUCTURED_REQUEST_TIMEOUT_SECONDS,
     ) -> StructuredResult:
-        selected_model = (model_name or self.model_name).strip()
+        primary_model = (model_name or self.model_name).strip()
+        fallback_model = str(fallback_model_name or "").strip()
+        candidate_models = [primary_model]
+        if fallback_model and fallback_model != primary_model:
+            candidate_models.append(fallback_model)
+
         last_error: Exception | None = None
 
-        for index, api_key in enumerate(self.api_keys, start=1):
-            configs = self._generation_configs(
-                model_name=selected_model,
-                temperature=temperature,
-                thinking_level="low",
-            )
+        for model_index, selected_model in enumerate(candidate_models):
+            model_last_error: Exception | None = None
 
-            for generation_config in configs:
-                started = time.perf_counter()
-                raw_text = ""
-                client = None
-                try:
-                    request: dict[str, Any] = {
-                        "model": selected_model,
-                        "input": prompt,
-                        "system_instruction": system_instruction,
-                        "response_format": {
-                            "type": "text",
-                            "mime_type": "application/json",
-                            "schema": schema.model_json_schema(),
-                        },
-                        "store": False,
-                    }
-                    if generation_config is not None:
-                        request["generation_config"] = generation_config
+            for index, api_key in enumerate(self.api_keys, start=1):
+                configs = self._generation_configs(
+                    model_name=selected_model,
+                    temperature=temperature,
+                    thinking_level="low",
+                )
 
-                    # 與 generate_text 相同，避免暫時 Client 被提早回收／關閉。
-                    client = self._client(api_key)
-                    response = client.interactions.create(
-                        **request,
-                        timeout=timeout_seconds,
-                    )
-                    raw_text = (response.output_text or "").strip()
-                    parsed = schema.model_validate_json(raw_text)
-                    latency = int((time.perf_counter() - started) * 1000)
-                    return StructuredResult(
-                        parsed=parsed,
-                        raw_text=raw_text,
-                        latency_ms=latency,
-                        key_slot=index,
-                    )
-                except (ValidationError, ValueError, TypeError) as exc:
-                    last_error = exc
-                    if generation_config is not None and self._is_generation_config_compat_error(exc):
-                        continue
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    if generation_config is not None and self._is_generation_config_compat_error(exc):
-                        continue
-                    break
-                finally:
-                    self._close_client(client)
+                for generation_config in configs:
+                    started = time.perf_counter()
+                    raw_text = ""
+                    client = None
+                    try:
+                        request: dict[str, Any] = {
+                            "model": selected_model,
+                            "input": prompt,
+                            "system_instruction": system_instruction,
+                            "response_format": {
+                                "type": "text",
+                                "mime_type": "application/json",
+                                "schema": schema.model_json_schema(),
+                            },
+                            "store": False,
+                        }
+                        if generation_config is not None:
+                            request["generation_config"] = generation_config
+
+                        client = self._client(api_key)
+                        response = client.interactions.create(
+                            **request,
+                            timeout=timeout_seconds,
+                        )
+                        raw_text = (response.output_text or "").strip()
+                        parsed = schema.model_validate_json(raw_text)
+                        latency = int((time.perf_counter() - started) * 1000)
+                        return StructuredResult(
+                            parsed=parsed,
+                            raw_text=raw_text,
+                            latency_ms=latency,
+                            key_slot=index,
+                            model_name=selected_model,
+                        )
+                    except (ValidationError, ValueError, TypeError) as exc:
+                        model_last_error = exc
+                        last_error = exc
+                        if (
+                            generation_config is not None
+                            and self._is_generation_config_compat_error(exc)
+                        ):
+                            continue
+                        break
+                    except Exception as exc:
+                        model_last_error = exc
+                        last_error = exc
+                        if (
+                            generation_config is not None
+                            and self._is_generation_config_compat_error(exc)
+                        ):
+                            continue
+                        break
+                    finally:
+                        self._close_client(client)
+
+            # 只有主要評量模型碰到 quota/rate-limit 時才切換備援模型。
+            if (
+                model_index == 0
+                and len(candidate_models) > 1
+                and model_last_error is not None
+                and self._is_quota_error(model_last_error)
+            ):
+                continue
+            break
 
         raise GatewayError(
             _friendly_gateway_error(
@@ -320,3 +365,4 @@ class GeminiGateway:
                 timeout_seconds=timeout_seconds,
             )
         ) from last_error
+
