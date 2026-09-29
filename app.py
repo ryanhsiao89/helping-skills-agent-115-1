@@ -62,6 +62,7 @@ def init_state() -> None:
         "turn_index": 0,
         "assessment": None,
         "assessment_error": "",
+        "assessment_model_used": "",
         "logging_error": "",
         "admin_ok": False,
         # Gemini Key 僅存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
@@ -176,6 +177,7 @@ def logout_student() -> None:
         "turn_index",
         "assessment",
         "assessment_error",
+        "assessment_model_used",
         "logging_error",
         "student_api_key",
         "verified_email",
@@ -362,6 +364,7 @@ def start_session(
     st.session_state.turn_index = 0
     st.session_state.assessment = None
     st.session_state.assessment_error = ""
+    st.session_state.assessment_model_used = ""
     st.session_state.logging_error = ""
     content, speaker_role, ui_role = initial_message(session)
     log_message(store=store, content=content, speaker_role=speaker_role, ui_role=ui_role)
@@ -430,6 +433,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                 temperature=settings.evaluator_temperature,
                 schema=AssessmentResult,
                 model_name=settings.evaluator_model_name,
+                fallback_model_name=settings.evaluator_fallback_model_name,
             )
         except GatewayError as exc:
             assessment_status = "completed_evaluation_error"
@@ -462,6 +466,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
             parsed = result.parsed.model_dump()
             # AI 回饋先呈現在學生畫面；即使後續 Sheets 寫入失敗，也不丟掉已成功取得的回饋。
             st.session_state.assessment = parsed
+            st.session_state.assessment_model_used = result.model_name
             continuity_for_memory = parsed.get("continuity") or None
             memory_status = "ready"
 
@@ -488,7 +493,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                         "next_tasks_json": parsed["next_practice_tasks"],
                         "raw_model_output": result.raw_text,
                         "parsed_json": parsed,
-                        "evaluator_model": settings.evaluator_model_name,
+                        "evaluator_model": result.model_name,
                         "evaluator_temperature": settings.evaluator_temperature,
                         "status": "success",
                     },
@@ -508,7 +513,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                             "effect": event["effect"],
                             "alternative_response": event.get("alternative_response", ""),
                             "created_at": created_at,
-                            "evaluator_model": settings.evaluator_model_name,
+                            "evaluator_model": result.model_name,
                             "rubric_version": settings.rubric_version,
                         },
                     )
@@ -1151,6 +1156,14 @@ else:
 
         if st.session_state.assessment:
             render_assessment(st.session_state.assessment)
+            model_used = st.session_state.get("assessment_model_used", "")
+            if (
+                model_used
+                and model_used != settings.evaluator_model_name
+            ):
+                st.info(
+                    f"本次 AI 督導回饋因主要模型額度限制，自動改由 {model_used} 完成。"
+                )
         elif st.session_state.assessment_error:
             st.error(st.session_state.assessment_error)
         elif session.get("completion_status") == "safety_ended":
