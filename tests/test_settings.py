@@ -20,7 +20,7 @@ def test_loads_teacher_settings_without_server_gemini_key():
     assert settings.gemini_api_keys == ()
     assert settings.gemini_configured is False
     assert settings.model_name == "gemini-3.5-flash-lite"
-    assert settings.evaluator_model_name == "gemini-3.8-flash"
+    assert settings.evaluator_model_name == "gemini-3.5-flash-lite"
     assert settings.evaluator_fallback_model_name == "gemini-3.5-flash-lite"
     assert settings.service_account_info()["client_email"] == "bot@example.test"
     assert settings.require_sheets is True
@@ -73,7 +73,7 @@ def test_legacy_model_name_does_not_override_new_dialogue_default():
     )
 
     assert settings.model_name == "gemini-3.5-flash-lite"
-    assert settings.evaluator_model_name == "gemini-3.8-flash"
+    assert settings.evaluator_model_name == "gemini-3.5-flash-lite"
     assert settings.evaluator_fallback_model_name == "gemini-3.5-flash-lite"
 
 
@@ -81,11 +81,22 @@ def test_new_model_settings_can_be_overridden_explicitly():
     settings = load_settings(
         {
             "DIALOGUE_MODEL_NAME": "gemini-3.5-flash-lite",
-            "EVALUATOR_MODEL_NAME": "gemini-3.8-flash",
-            "EVALUATOR_FALLBACK_MODEL_NAME": "gemini-3.5-flash-lite",
+            "SUPERVISOR_MODEL_NAME": "gemini-3.5-flash-lite",
         }
     )
 
     assert settings.model_name == "gemini-3.5-flash-lite"
-    assert settings.evaluator_model_name == "gemini-3.8-flash"
+    assert settings.evaluator_model_name == "gemini-3.5-flash-lite"
+    assert settings.evaluator_fallback_model_name == "gemini-3.5-flash-lite"
+
+
+
+def test_legacy_evaluator_model_name_is_ignored_for_stability():
+    settings = load_settings(
+        {
+            "EVALUATOR_MODEL_NAME": "gemini-3.8-flash",
+        }
+    )
+
+    assert settings.evaluator_model_name == "gemini-3.5-flash-lite"
     assert settings.evaluator_fallback_model_name == "gemini-3.5-flash-lite"
