@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 from src.gemini_gateway import GeminiGateway, GatewayError
 
@@ -82,3 +83,87 @@ def test_custom_timeout_message_uses_requested_seconds(monkeypatch):
         )
 
     assert fake.interactions.calls == 1
+
+
+
+class AssessmentProbe(BaseModel):
+    value: str
+
+
+class QuotaError(RuntimeError):
+    status_code = 429
+
+
+class FallbackInteractions:
+    def __init__(self):
+        self.models = []
+
+    def create(self, **kwargs):
+        model = kwargs["model"]
+        self.models.append(model)
+        if model == "gemini-3.8-flash":
+            raise QuotaError("RESOURCE_EXHAUSTED: quota exceeded")
+        return SimpleNamespace(output_text='{"value":"ok"}')
+
+
+class FallbackClient:
+    def __init__(self):
+        self.interactions = FallbackInteractions()
+
+
+def test_structured_evaluator_falls_back_to_flash_lite_on_quota(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.5-flash-lite")
+    fake = FallbackClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+
+    result = gateway.generate_structured(
+        prompt="evaluate",
+        system_instruction="system",
+        temperature=0.0,
+        schema=AssessmentProbe,
+        model_name="gemini-3.8-flash",
+        fallback_model_name="gemini-3.5-flash-lite",
+    )
+
+    assert result.parsed.value == "ok"
+    assert result.model_name == "gemini-3.5-flash-lite"
+    assert fake.interactions.models == [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+    ]
+
+
+class InvalidKeyError(RuntimeError):
+    status_code = 400
+
+
+class InvalidKeyInteractions:
+    def __init__(self):
+        self.models = []
+
+    def create(self, **kwargs):
+        self.models.append(kwargs["model"])
+        raise InvalidKeyError("API_KEY_INVALID: API key not valid")
+
+
+class InvalidKeyClient:
+    def __init__(self):
+        self.interactions = InvalidKeyInteractions()
+
+
+def test_structured_evaluator_does_not_fallback_on_invalid_key(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.5-flash-lite")
+    fake = InvalidKeyClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+
+    with pytest.raises(GatewayError, match="API Key 無效"):
+        gateway.generate_structured(
+            prompt="evaluate",
+            system_instruction="system",
+            temperature=0.0,
+            schema=AssessmentProbe,
+            model_name="gemini-3.8-flash",
+            fallback_model_name="gemini-3.5-flash-lite",
+        )
+
+    assert fake.interactions.models == ["gemini-3.8-flash"]
