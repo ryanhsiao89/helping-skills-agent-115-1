@@ -142,14 +142,15 @@ def load_settings(secrets: Mapping[str, Any]) -> Settings:
         _value(secrets, "DIALOGUE_MODEL_NAME", "gemini-3.5-flash-lite")
         or "gemini-3.5-flash-lite"
     ).strip()
+    # AI 督導也改用 Flash Lite，避免 Gemini 3.8 Flash 每日額度與尖峰 503
+    # 影響學生結束晤談時取得回饋。舊版 EVALUATOR_MODEL_NAME 會被刻意忽略，
+    # 若日後需要更換督導模型，請使用新的 SUPERVISOR_MODEL_NAME。
     evaluator_model_name = str(
-        _value(secrets, "EVALUATOR_MODEL_NAME", "gemini-3.8-flash")
-        or "gemini-3.8-flash"
+        _value(secrets, "SUPERVISOR_MODEL_NAME", "gemini-3.5-flash-lite")
+        or "gemini-3.5-flash-lite"
     ).strip()
-    evaluator_fallback_model_name = str(
-        _value(secrets, "EVALUATOR_FALLBACK_MODEL_NAME", dialogue_model_name)
-        or dialogue_model_name
-    ).strip()
+    # 保留欄位以相容既有程式；目前主要與備援督導模型相同，不再依賴 3.8。
+    evaluator_fallback_model_name = evaluator_model_name
 
     return Settings(
         gemini_api_keys=(),
