@@ -1,8 +1,12 @@
-"""晤談後結構化回饋的資料模型。"""
+"""晤談後結構化回饋的資料模型。
+
+完整保留新版教學體驗／實作雙模式、跨次續談摘要（ContinuitySummary）、
+形成性回饋與技巧事件明細，並整合 5+1 微技巧（含優勢本位探問）量化評分維度。
+"""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Dict, Literal
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +55,16 @@ class AssessmentResult(BaseModel):
     mode: Literal["experience", "practice"]
     overall_summary: str
     stage_judgment: str
+
+    # 🌟 融入舊版 5+1 微技巧 1-5 分量化評分維度（對齊研究資料庫 Assessments）
+    dimension_scores: Dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "5+1 微技巧量化評分（1-5 分整數）。包含鍵值："
+            "專注、傾聽、開放式探問、重述、情感反映、優勢本位探問"
+        ),
+    )
+
     strengths: list[FeedbackPoint] = Field(min_length=1, max_length=3)
     improvement_points: list[FeedbackPoint] = Field(min_length=1, max_length=3)
     technique_events: list[TechniqueEvent]
