@@ -397,7 +397,6 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
         return
 
     # 先把 Session 正式結束時間保存，再產生 AI 回饋。
-    # 這樣即使 Gemini 回饋逾時或後續評量寫入失敗，本次可稽核的上機分鐘仍有機會被保留。
     ended_at = now_iso()
     session["ended_at"] = ended_at
     session["completion_status"] = "completed_evaluation_pending"
@@ -438,7 +437,6 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
         except GatewayError as exc:
             assessment_status = "completed_evaluation_error"
             st.session_state.assessment_error = str(exc)
-            # 評量失敗本身也盡量留下紀錄；若 Sheets 暫時不可用，不阻塞 Session 結束。
             try:
                 store.append_record(
                     "Assessments",
@@ -464,7 +462,6 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                 st.session_state.logging_error = str(sheet_exc)
         else:
             parsed = result.parsed.model_dump()
-            # AI 回饋先呈現在學生畫面；即使後續 Sheets 寫入失敗，也不丟掉已成功取得的回饋。
             st.session_state.assessment = parsed
             st.session_state.assessment_model_used = result.model_name
             continuity_for_memory = parsed.get("continuity") or None
@@ -478,6 +475,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                 for point in parsed["strengths"] + parsed["improvement_points"]
             ]
             try:
+                # 🌟 修正點：將 parsed.get("dimension_scores", {}) 完整寫入 Google Sheets
                 store.append_record(
                     "Assessments",
                     {
@@ -485,7 +483,7 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                         "session_id": session["session_id"],
                         "rubric_version": settings.rubric_version,
                         "created_at": created_at,
-                        "dimension_scores_json": {},
+                        "dimension_scores_json": parsed.get("dimension_scores", {}),
                         "stage_judgment": parsed["stage_judgment"],
                         "strengths_json": parsed["strengths"],
                         "improvement_points_json": parsed["improvement_points"],
@@ -518,10 +516,8 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
                         },
                     )
             except SheetsStoreError as exc:
-                # 不把「寫入評量表失敗」誤判成「AI 回饋失敗」；學生仍可看到已產生的回饋。
                 st.session_state.logging_error = str(exc)
 
-    # 只有學生主動選擇保留／續談時才保存跨日記憶。
     if session.get("mode") == "experience" and session.get("retain_for_continuity"):
         try:
             save_continuity_memory(
@@ -545,8 +541,8 @@ def finish_session(settings: Settings, store, gateway: GeminiGateway | None) -> 
             ),
         )
     except SheetsStoreError as exc:
-        # 若前面的 pending 狀態已寫入成功，使用時間仍可被稽核；此處只提示教師留意。
         st.session_state.logging_error = str(exc)
+
 
 def safety_end(store) -> None:
     session = st.session_state.active_session
@@ -645,7 +641,6 @@ def handle_user_turn(
 
 
 def reset_for_new_session() -> None:
-    # 清除上一段練習資料，但保留已驗證學校 Email 與學生 API Key。
     for key in (
         "active_session",
         "messages",
@@ -663,6 +658,17 @@ def render_assessment(assessment: dict) -> None:
     st.subheader("晤談後形成性回饋")
     st.write(assessment["overall_summary"])
     st.caption(f"歷程判斷：{assessment['stage_judgment']}")
+
+    # 🌟 畫面呈現 5+1 微技巧量化維度評分
+    dimension_scores = assessment.get("dimension_scores", {})
+    if dimension_scores:
+        st.markdown("#### 📊 5+1 微技巧量化評分 (1-5分)")
+        cols = st.columns(3)
+        core_keys = ["專注", "傾聽", "開放式探問", "重述", "情感反映", "優勢本位探問"]
+        for idx, key in enumerate(core_keys):
+            score = dimension_scores.get(key, 0)
+            col_target = cols[idx % 3]
+            col_target.metric(key, f"{score} / 5 分" if score > 0 else "評估中")
 
     st.markdown("#### 做得好的地方")
     for point in assessment["strengths"]:
@@ -732,7 +738,7 @@ st.title("助人技巧訓練 Agent")
 st.caption("教學模擬、技能演練、跨次續談、歷程紀錄與形成性回饋")
 st.warning(
     "本系統僅供教學演練，不提供心理治療、診斷或緊急危機服務。請勿輸入真實個案姓名、電話、地址、學校或機構等可識別資訊。",
-    icon="⚠️",
+    icon="⚠️️",
 )
 
 with st.sidebar:
@@ -928,12 +934,12 @@ if not session:
 
         duration_target_min = st.select_slider(
             "建議練習時間（不會強制中斷）",
-            options=[5, 8, 10, 12, 15, 20],
-            value=10,
+            options=[5, 8, 10, 12, 15, 20, 25, 30],
+            value=20,
         )
 
         experience_topic_id = "interpersonal"
-        case_id = "college_peer_01"
+        case_id = "lin_chih_ming"  # 🌟 預設指向經典林志明個案
         training_path = "full"
 
         if mode == "experience":
@@ -954,6 +960,7 @@ if not session:
             case_id = st.selectbox(
                 "選擇虛構標準化案例",
                 options=list(options),
+                index=0,
                 format_func=lambda value: options[value],
             )
             st.caption(PRACTICE_CASES[case_id]["public_brief"])
@@ -966,6 +973,7 @@ if not session:
             training_path = st.selectbox(
                 "練習路徑",
                 options=list(path_labels),
+                index=1,  # 🌟 預設指向探索階段
                 format_func=lambda value: path_labels[value],
             )
 
@@ -1027,7 +1035,6 @@ if not session:
                         )
                 except GatewayError as exc:
                     errors.append(f"Gemini API Key 驗證失敗：{exc}")
-                    # 驗證失敗即清掉目前 Key，避免側欄誤顯示成已可使用。
                     st.session_state.student_api_key = ""
                     gateway = None
                     gateway_error = str(exc)
@@ -1172,7 +1179,6 @@ else:
         if session.get("mode") == "experience" and session.get("continuity_saved"):
             st.success("已建立下次續談記憶。下次用相同學校 Email 完成 OTP 驗證後，即可選擇「繼續上次談話」。")
 
-        # 保留學生自主下載逐字稿，供課後重新閱讀、自我反思與學習；續談本身不需要重新上傳。
         transcript = format_transcript(st.session_state.messages, max_chars=100000)
         st.download_button(
             "下載本次逐字稿（選用；可供課後自我反思）",
