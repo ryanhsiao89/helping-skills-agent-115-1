@@ -1,7 +1,13 @@
 import gspread
 
 from src.constants import SHEET_HEADERS
-from src.sheets_store import SheetsStore, _cell_value, _column_letter
+from src.sheets_store import (
+    SheetsStore,
+    _cell_value,
+    _column_letter,
+    _friendly_sheet_error,
+    _google_api_detail,
+)
 
 
 class FakeWorksheet:
@@ -119,3 +125,40 @@ def test_student_by_email_is_case_insensitive():
     assert row is not None
     assert row["participant_id"] == "SABC123"
     assert store.student_by_email("other@school.edu.tw") is None
+
+
+
+class FakeResponse:
+    status_code = 403
+
+    def json(self):
+        return {
+            "error": {
+                "code": 403,
+                "message": "The caller does not have permission",
+                "status": "PERMISSION_DENIED",
+                "errors": [{"reason": "forbidden"}],
+            }
+        }
+
+
+class FakeGoogleError(Exception):
+    def __init__(self):
+        super().__init__("APIError: 403")
+        self.response = FakeResponse()
+
+
+def test_google_api_detail_extracts_safe_403_reason():
+    detail = _google_api_detail(FakeGoogleError())
+
+    assert "status=PERMISSION_DENIED" in detail
+    assert "reason=forbidden" in detail
+    assert "The caller does not have permission" in detail
+
+
+def test_friendly_sheet_error_includes_google_403_diagnostic():
+    message = _friendly_sheet_error("寫入 Sessions 失敗", FakeGoogleError())
+
+    assert "Google Sheets 權限驗證失敗（403）" in message
+    assert "PERMISSION_DENIED" in message
+    assert "The caller does not have permission" in message
