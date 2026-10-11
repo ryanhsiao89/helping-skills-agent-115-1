@@ -37,6 +37,55 @@ def _status_code(exc: Exception) -> int | None:
         return None
 
 
+def _google_api_detail(exc: Exception) -> str:
+    """擷取 Google API 可公開的錯誤摘要，不顯示憑證、token 或完整回應內容。"""
+    response = getattr(exc, "response", None)
+    parts: list[str] = []
+
+    if response is not None:
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            error = payload.get("error", payload)
+            if isinstance(error, dict):
+                status = str(error.get("status", "") or "").strip()
+                message = str(error.get("message", "") or "").strip()
+                reasons: list[str] = []
+                for item in error.get("errors", []) or []:
+                    if isinstance(item, dict):
+                        reason = str(item.get("reason", "") or "").strip()
+                        if reason and reason not in reasons:
+                            reasons.append(reason)
+                if status:
+                    parts.append(f"status={status}")
+                if reasons:
+                    parts.append("reason=" + ",".join(reasons[:3]))
+                if message:
+                    parts.append("message=" + message)
+
+    if not parts:
+        raw = str(exc or "").replace("\r", " ").replace("\n", " ").strip()
+        if raw:
+            parts.append(raw)
+
+    detail = " | ".join(parts)
+    # 防禦性遮蔽常見機密格式；Google Sheets 錯誤通常不會包含這些資訊。
+    import re
+    detail = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[API_KEY_REDACTED]", detail)
+    detail = re.sub(
+        r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    detail = " ".join(detail.split())
+    if len(detail) > 500:
+        detail = detail[:500] + "…"
+    return detail
+
+
 def _run_with_retry(operation):
     """對 Google Sheets 429/5xx 做短暫指數退避，降低多人同時使用時的瞬斷。"""
     last_error: Exception | None = None
@@ -68,9 +117,12 @@ def _friendly_sheet_error(action: str, exc: Exception) -> str:
             "系統已自動重試仍未成功，請稍後再試。"
         )
     if status in {401, 403}:
+        detail = _google_api_detail(exc)
+        suffix = f" Google 回傳：{detail}" if detail else ""
         return (
             f"{action}：Google Sheets 權限驗證失敗（{status}）。"
-            "請教師確認 Streamlit Secrets 的服務帳戶設定，以及試算表是否仍分享給該服務帳戶。"
+            "已確認一般共用權限後，請將下列 Google 原始診斷提供給教師判讀。"
+            f"{suffix}"
         )
     return action
 
