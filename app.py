@@ -24,7 +24,12 @@ from src.email_otp import (
     participant_id_for_email,
     send_otp_email,
 )
-from src.gemini_gateway import GatewayError, GeminiGateway
+from src.gemini_gateway import (
+    GatewayError,
+    GeminiGateway,
+    is_invalid_api_key_error,
+    is_timeout_error,
+)
 from src.prompts import (
     dialogue_system_prompt,
     dialogue_turn_input,
@@ -67,6 +72,7 @@ def init_state() -> None:
         "admin_ok": False,
         # Gemini Key 僅存在目前瀏覽器的 Streamlit session；不寫入 Google Sheets。
         "student_api_key": "",
+        "student_api_key_validated": False,
         "start_mode": "experience",
         # 學校 Email OTP 登入狀態。
         "auth_verified": False,
@@ -180,6 +186,7 @@ def logout_student() -> None:
         "assessment_model_used",
         "logging_error",
         "student_api_key",
+        "student_api_key_validated",
         "verified_email",
         "verified_participant_id",
     ):
@@ -748,8 +755,10 @@ with st.sidebar:
     else:
         st.info("身分：請以學校 Email 驗證")
 
-    if gateway is not None:
-        st.success(f"Gemini：已使用學生 API Key（{settings.model_name}）")
+    if gateway is not None and st.session_state.get("student_api_key_validated", False):
+        st.success(f"Gemini：已驗證學生 API Key（{settings.model_name}）")
+    elif gateway is not None:
+        st.info("Gemini：API Key 已暫存，尚待連線驗證")
     elif gateway_error:
         st.error(f"Gemini API Key 設定錯誤：{gateway_error}")
     else:
@@ -978,7 +987,10 @@ if not session:
             )
 
         agreed = st.checkbox("我了解這是教學模擬，並同意不輸入可識別的真實個案資料。")
-        st.caption("開始前會先驗證 Gemini API Key 是否真的可呼叫模型；驗證失敗不會建立 Session。")
+        st.caption(
+            "開始前會先驗證 Gemini API Key 是否真的可呼叫模型；"
+            "若只是網路／服務逾時，系統會自動再試一次。驗證失敗不會建立 Session。"
+        )
         submitted = st.form_submit_button(
             "驗證 API Key 並開始練習",
             type="primary",
@@ -1018,30 +1030,60 @@ if not session:
 
         if not errors:
             st.session_state.student_api_key = student_api_key
+            st.session_state.student_api_key_validated = False
             gateway, gateway_error = build_student_gateway(settings)
             if gateway is None:
                 errors.append(
                     f"Gemini API Key 無法使用：{gateway_error or '請確認 API Key 是否正確。'}"
                 )
             else:
-                try:
-                    with st.spinner("正在驗證 Gemini API Key 是否可用……"):
-                        gateway.generate_text(
-                            prompt="請只回覆 OK。",
-                            system_instruction="這是 API Key 連線測試。只回覆 OK，不要加入其他內容。",
-                            temperature=0.0,
-                            thinking_level="low",
-                            timeout_seconds=15.0,
+                validation_error: GatewayError | None = None
+                with st.spinner(
+                    "正在驗證 Gemini API Key 是否可用……"
+                    "若第一次逾時會自動再試一次（每次最長 30 秒）。"
+                ):
+                    for attempt in range(2):
+                        try:
+                            gateway.generate_text(
+                                prompt="請只回覆 OK。",
+                                system_instruction="這是 API Key 連線測試。只回覆 OK，不要加入其他內容。",
+                                temperature=0.0,
+                                thinking_level="low",
+                                timeout_seconds=30.0,
+                            )
+                        except GatewayError as exc:
+                            validation_error = exc
+                            root_error = exc.__cause__
+                            if is_timeout_error(root_error) and attempt == 0:
+                                continue
+                            break
+                        else:
+                            validation_error = None
+                            st.session_state.student_api_key_validated = True
+                            break
+
+                if validation_error is not None:
+                    root_error = validation_error.__cause__
+                    gateway_error = str(validation_error)
+
+                    if is_timeout_error(root_error):
+                        # Timeout 不等於 Key 無效：保留 Key，讓學生稍後可直接再驗證。
+                        errors.append(
+                            "Gemini 目前回應較慢：兩次連線驗證都超過 30 秒。"
+                            "這不代表 API Key 無效，也不需要重新申請 Key。"
+                            "請稍候後再按一次「驗證 API Key 並開始練習」。"
                         )
-                except GatewayError as exc:
-                    errors.append(f"Gemini API Key 驗證失敗：{exc}")
-                    st.session_state.student_api_key = ""
-                    gateway = None
-                    gateway_error = str(exc)
+                    elif is_invalid_api_key_error(root_error):
+                        errors.append(f"Gemini API Key 驗證失敗：{validation_error}")
+                        # 只有 Google 明確回報 Key 無效時才清掉，避免學生反覆重貼壞 Key。
+                        st.session_state.student_api_key = ""
+                        st.session_state.student_api_key_validated = False
+                        gateway = None
+                    else:
+                        # quota、權限或暫時性服務錯誤都不清 Key，避免學生誤以為要重新申請。
+                        errors.append(f"Gemini API Key 驗證暫時未完成：{validation_error}")
 
         if errors:
-            if gateway is None:
-                st.session_state.student_api_key = ""
             for error in errors:
                 st.error(error)
         else:
