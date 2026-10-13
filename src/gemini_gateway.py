@@ -74,6 +74,28 @@ def _safe_error_detail(exc: Exception | None) -> str:
     return " | ".join(labels)
 
 
+def is_timeout_error(exc: Exception | None) -> bool:
+    """判斷供應商錯誤是否為連線／讀取逾時。"""
+    if exc is None:
+        return False
+    raw = str(exc or "")
+    upper = raw.upper()
+    error_name = type(exc).__name__.upper()
+    return (
+        "TIMEOUT" in error_name
+        or "TIMEOUT" in upper
+        or "TIMED OUT" in upper
+    )
+
+
+def is_invalid_api_key_error(exc: Exception | None) -> bool:
+    """只有 Google 明確判定 API Key 無效時才回傳 True。"""
+    if exc is None:
+        return False
+    upper = str(exc or "").upper()
+    return "API_KEY_INVALID" in upper or "API KEY NOT VALID" in upper
+
+
 def _friendly_gateway_error(
     exc: Exception | None,
     *,
@@ -83,8 +105,7 @@ def _friendly_gateway_error(
     """把常見 Gemini 錯誤轉成學生可直接採取行動的訊息。"""
     raw = str(exc or "")
     upper = raw.upper()
-    error_name = type(exc).__name__.upper() if exc is not None else ""
-    if "TIMEOUT" in error_name or "TIMEOUT" in upper or "TIMED OUT" in upper:
+    if is_timeout_error(exc):
         timeout_label = (
             f"{int(timeout_seconds)} 秒"
             if timeout_seconds is not None
@@ -99,7 +120,7 @@ def _friendly_gateway_error(
             f"AI 回應等待超過 {timeout_label}，系統已停止等待。"
             "請確認網路後稍候再送出一次；不需要連續重複送出。"
         )
-    if "API_KEY_INVALID" in upper or "API KEY NOT VALID" in upper:
+    if is_invalid_api_key_error(exc):
         return (
             "Gemini API Key 無效。請回到 Google AI Studio 重新建立或複製有效的 API Key，"
             "再重新開始本次練習；請勿輸入一般 Google 帳號密碼。"
