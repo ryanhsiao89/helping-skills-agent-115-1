@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from src.gemini_gateway import GeminiGateway, GatewayError
+from src.gemini_gateway import (
+    GeminiGateway,
+    GatewayError,
+    is_invalid_api_key_error,
+    is_timeout_error,
+)
 
 
 class FakeInteractions:
@@ -167,3 +172,18 @@ def test_structured_evaluator_does_not_fallback_on_invalid_key(monkeypatch):
         )
 
     assert fake.interactions.models == ["gemini-3.8-flash"]
+
+
+
+def test_timeout_classifier_recognizes_timeout_errors():
+    assert is_timeout_error(TimeoutError("request timed out")) is True
+    assert is_timeout_error(RuntimeError("temporary service error")) is False
+
+
+def test_invalid_key_classifier_only_matches_explicit_invalid_key():
+    assert is_invalid_api_key_error(
+        RuntimeError("API_KEY_INVALID: API key not valid")
+    ) is True
+    assert is_invalid_api_key_error(
+        RuntimeError("RESOURCE_EXHAUSTED: quota exceeded")
+    ) is False
