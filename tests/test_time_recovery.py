@@ -134,3 +134,23 @@ def test_invalid_gap_remains_for_teacher_manual_review():
 def test_recovery_id_deterministic():
     assert recovery_id_for_session(SID) == recovery_id_for_session(SID)
     assert recovery_id_for_session(SID) != recovery_id_for_session("another")
+
+
+def test_two_minute_threshold_excludes_grace_period():
+    logs = [
+        {
+            "session_id": SID,
+            "turn_id": str(i),
+            "timestamp": stamp,
+            "speaker_role": role,
+        }
+        for i, (role, stamp) in enumerate([
+            ("student_counselor", "2026-10-18T14:25:46+08:00"),
+            ("ai_client", "2026-10-18T14:25:48+08:00"),
+            ("student_counselor", "2026-10-18T14:26:01+08:00"),
+            ("ai_client", "2026-10-18T14:26:03+08:00"),
+        ])
+    ]
+    assert recovery_candidate(
+        _session(), logs, now=datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc)
+    ) is None
