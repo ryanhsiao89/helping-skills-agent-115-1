@@ -187,3 +187,66 @@ def test_invalid_key_classifier_only_matches_explicit_invalid_key():
     assert is_invalid_api_key_error(
         RuntimeError("RESOURCE_EXHAUSTED: quota exceeded")
     ) is False
+
+
+
+class EmptyThenTextInteractions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return SimpleNamespace(output_text="")
+        return SimpleNamespace(output_text="第二次成功")
+
+
+class EmptyThenTextClient:
+    def __init__(self):
+        self.interactions = EmptyThenTextInteractions()
+
+
+def test_dialogue_retries_once_when_model_returns_empty_text(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.5-flash-lite")
+    fake = EmptyThenTextClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+    monkeypatch.setattr("src.gemini_gateway.time.sleep", lambda _seconds: None)
+
+    result = gateway.generate_text(
+        prompt="hello",
+        system_instruction="system",
+        temperature=0.35,
+    )
+
+    assert result.text == "第二次成功"
+    assert fake.interactions.calls == 2
+
+
+class AlwaysEmptyInteractions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        return SimpleNamespace(output_text="")
+
+
+class AlwaysEmptyClient:
+    def __init__(self):
+        self.interactions = AlwaysEmptyInteractions()
+
+
+def test_dialogue_empty_text_twice_returns_friendly_message(monkeypatch):
+    gateway = GeminiGateway(("test-key",), "gemini-3.5-flash-lite")
+    fake = AlwaysEmptyClient()
+    monkeypatch.setattr(gateway, "_client", lambda _key: fake)
+    monkeypatch.setattr("src.gemini_gateway.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(GatewayError, match="不代表 API Key 無效"):
+        gateway.generate_text(
+            prompt="hello",
+            system_instruction="system",
+            temperature=0.35,
+        )
+
+    assert fake.interactions.calls == 2
