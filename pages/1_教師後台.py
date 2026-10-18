@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import time
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +19,7 @@ from src.email_otp import (
     send_otp_email,
 )
 from src.settings import load_settings
+from src.time_recovery import credited_recoveries, latest_recovery_events, recovery_candidate
 from src.sheets_store import SheetsStore, SheetsStoreError
 from src.usage_time import (
     COUNTABLE_COMPLETION_STATUSES,
@@ -47,6 +49,7 @@ def build_student_usage_summary(
     roster: pd.DataFrame,
     sessions: pd.DataFrame,
     chat_logs: pd.DataFrame,
+    recovery_ledger: pd.DataFrame,
 ) -> pd.DataFrame:
     columns = [
         "school_email",
@@ -57,6 +60,7 @@ def build_student_usage_summary(
         "total_minutes",
         "counselor_minutes",
         "experience_minutes",
+        "recovered_minutes",
         "remaining_total_minutes",
         "remaining_counselor_minutes",
         "requirement_met",
@@ -67,11 +71,14 @@ def build_student_usage_summary(
 
     session_rows = sessions.to_dict("records") if not sessions.empty else []
     chat_rows = chat_logs.to_dict("records") if not chat_logs.empty else []
+    recovery_rows = recovery_ledger.to_dict("records") if not recovery_ledger.empty else []
     records: list[dict] = []
 
     for _, roster_row in roster.iterrows():
         participant_id = str(roster_row.get("participant_id", "") or "").strip()
-        summary = audited_usage_summary(participant_id, session_rows, chat_rows)
+        summary = audited_usage_summary(
+            participant_id, session_rows, chat_rows, recovery_rows
+        )
         participant_sessions = [
             row
             for row in session_rows
@@ -91,6 +98,7 @@ def build_student_usage_summary(
                 "total_minutes": summary.total_minutes,
                 "counselor_minutes": summary.counselor_minutes,
                 "experience_minutes": summary.experience_minutes,
+                "recovered_minutes": summary.recovered_minutes,
                 "remaining_total_minutes": summary.remaining_minutes,
                 "remaining_counselor_minutes": summary.remaining_counselor_minutes,
                 "requirement_met": "是" if summary.semester_requirement_met else "否",
@@ -363,6 +371,7 @@ student_summary = build_student_usage_summary(
     frames["StudentRoster"],
     sessions,
     frames["ChatLogs"],
+    frames["TimeRecoveryLedger"],
 )
 st.subheader("學生使用摘要")
 st.caption(
@@ -377,6 +386,108 @@ st.download_button(
     mime="text/csv",
     key="download_student_usage_summary",
 )
+
+# 研究時數復原：原始 Sessions/ChatLogs 保持不變；每次裁定均追加一列。
+with st.expander("異常中斷分鐘復原與撤銷（教師專用）", expanded=False):
+    st.caption(
+        "僅處理已閒置至少 15 分鐘、有至少兩輪學生與 AI 互動、"
+        "時間跨度達 2 分鐘、且任兩輪沒有超過 15 分鐘空窗的 in_progress Session。"
+        "補認列依最後有效互動後最多加計 120 秒，不修改原始結束時間。"
+    )
+    session_rows = frames["Sessions"].to_dict("records")
+    chat_rows = frames["ChatLogs"].to_dict("records")
+    recovery_rows = frames["TimeRecoveryLedger"].to_dict("records")
+    latest_events = latest_recovery_events(recovery_rows)
+    candidates = []
+    for record in session_rows:
+        if str(record.get("completion_status", "")) != "in_progress":
+            continue
+        candidate = recovery_candidate(
+            record, chat_rows, now=datetime.now(timezone.utc)
+        )
+        if candidate and candidate.session_id not in latest_events:
+            candidates.append(candidate)
+
+    if candidates:
+        candidate_by_id = {item.session_id: item for item in candidates}
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "participant_id": item.participant_id,
+                    "session_id": item.session_id,
+                    "mode": item.mode,
+                    "可補認列分鐘": item.minutes,
+                    "學生輪數": item.student_turns,
+                    "AI 輪數": item.ai_turns,
+                }
+                for item in candidates
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
+        chosen_id = st.selectbox(
+            "選擇要補認列的 Session",
+            options=list(candidate_by_id),
+            format_func=lambda sid: (
+                f"{candidate_by_id[sid].participant_id}｜"
+                f"{sid[:8]}｜{candidate_by_id[sid].minutes:.1f} 分鐘"
+            ),
+            key="teacher_recovery_selected",
+        )
+        if st.button("確認並補認列選取學生的中斷時數", type="primary"):
+            try:
+                actor = (
+                    st.session_state.teacher_email
+                    if st.session_state.teacher_auth_method == "email_otp"
+                    else "admin_password"
+                )
+                restored = store.recover_stale_sessions(
+                    candidate_by_id[chosen_id].participant_id,
+                    actor=f"teacher:{actor}",
+                )
+                recovered = sum(int(row["credited_seconds"]) for row in restored) / 60
+                st.success(
+                    f"已記入 {len(restored)} 筆復原稽核事件，共 {recovered:.1f} 分鐘。"
+                )
+                st.rerun()
+            except SheetsStoreError as exc:
+                st.error(str(exc))
+    else:
+        st.info("目前沒有尚未處理且符合自動復原門檻的 Session。")
+
+    active = credited_recoveries(recovery_rows)
+    if active:
+        st.divider()
+        st.caption("如需撤銷已補認列時間，必須留下原因；撤銷採追加事件，不刪除原始資料。")
+        revoke_sid = st.selectbox(
+            "選擇要撤銷的 Session",
+            options=list(active),
+            key="teacher_recovery_revoke_sid",
+        )
+        revoke_note = st.text_input(
+            "撤銷原因（必填）",
+            key="teacher_recovery_revoke_reason",
+        )
+        if st.button(
+            "確認撤銷此筆補認列",
+            disabled=not revoke_note.strip(),
+        ):
+            try:
+                actor = (
+                    st.session_state.teacher_email
+                    if st.session_state.teacher_auth_method == "email_otp"
+                    else "admin_password"
+                )
+                store.append_recovery_decision(
+                    revoke_sid,
+                    actor=actor,
+                    status="teacher_revoked",
+                    note=revoke_note,
+                )
+                st.success("已追加撤銷紀錄；重新整理後將從 120／60 進度排除該筆時間。")
+                st.rerun()
+            except SheetsStoreError as exc:
+                st.error(str(exc))
 
 tabs = st.tabs(list(SHEET_HEADERS))
 for tab, (sheet_name, frame) in zip(tabs, frames.items(), strict=True):
