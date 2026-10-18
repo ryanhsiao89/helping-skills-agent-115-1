@@ -86,6 +86,27 @@ SHEET_HEADERS: dict[str, list[str]] = {
         "evaluator_temperature",
         "status",
     ],
+    # 追加式復原紀錄：每次裁定保留一列，不覆蓋原始 Sessions/ChatLogs。
+    "TimeRecoveryLedger": [
+        "event_id",
+        "recovery_id",
+        "session_id",
+        "participant_id",
+        "mode",
+        "recovery_status",
+        "credited_seconds",
+        "first_student_at",
+        "last_interaction_at",
+        "student_turns",
+        "ai_turns",
+        "source_turn_count",
+        "source_digest",
+        "policy_version",
+        "grace_seconds",
+        "actor",
+        "created_at",
+        "note",
+    ],
     # 跨日續談記憶。pin_hash 為舊版相容欄位，新版 Email OTP 流程會留空。
     "ContinuityMemory": [
         "memory_id",
