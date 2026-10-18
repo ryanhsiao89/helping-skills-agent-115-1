@@ -182,7 +182,9 @@ class NullStore:
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         return []
 
-    def recover_stale_sessions(self, participant_id: str) -> list[dict[str, Any]]:
+    def recover_stale_sessions(
+        self, participant_id: str, *, actor: str = "system:otp_verified_student"
+    ) -> list[dict[str, Any]]:
         return []
 
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
@@ -313,7 +315,9 @@ class SheetsStore:
             self.read_all("TimeRecoveryLedger"),
         )
 
-    def recover_stale_sessions(self, participant_id: str) -> list[dict[str, Any]]:
+    def recover_stale_sessions(
+        self, participant_id: str, *, actor: str = "system:otp_verified_student"
+    ) -> list[dict[str, Any]]:
         """學生重新登入時，復原有逐輪證據、已閒置的未結束練習。
 
         每個 Session 最多自動建一筆正式稽核事件；若教師已撤銷，
@@ -342,7 +346,7 @@ class SheetsStore:
             event = recovery_event_record(
                 candidate,
                 status="auto_verified",
-                actor="system:otp_verified_student",
+                actor=actor,
                 created_at=now.isoformat(timespec="seconds"),
                 note="Streamlit 意外中斷；已依 Sessions × ChatLogs 審核互動證據與 120 秒緩衝。",
             )
