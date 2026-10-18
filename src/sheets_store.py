@@ -387,9 +387,9 @@ class SheetsStore:
                 continue
             event = recovery_event_record(
                 candidate,
-                status="auto_verified",
+                status="teacher_approved" if actor.startswith("teacher:") else "auto_verified",
                 actor=actor,
-                created_at=now.isoformat(timespec="seconds"),
+                created_at=now.isoformat(timespec="microseconds"),
                 note="Streamlit 意外中斷；已依 Sessions × ChatLogs 審核互動證據與 120 秒緩衝。",
             )
             self.append_record("TimeRecoveryLedger", event)
