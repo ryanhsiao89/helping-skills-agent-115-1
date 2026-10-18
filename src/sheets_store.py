@@ -183,7 +183,8 @@ class NullStore:
         return []
 
     def recover_stale_sessions(
-        self, participant_id: str, *, actor: str = "system:otp_verified_student"
+        self, participant_id: str, *, actor: str = "system:otp_verified_student",
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -354,7 +355,8 @@ class SheetsStore:
         return added, usage
 
     def recover_stale_sessions(
-        self, participant_id: str, *, actor: str = "system:otp_verified_student"
+        self, participant_id: str, *, actor: str = "system:otp_verified_student",
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """學生重新登入時，復原有逐輪證據、已閒置的未結束練習。
 
@@ -378,6 +380,8 @@ class SheetsStore:
         now = datetime.now(timezone.utc)
         added = []
         for session in sessions:
+            if session_id is not None and str(session.get("session_id", "")) != session_id:
+                continue
             candidate = recovery_candidate(session, chat_rows, now=now)
             if candidate is None or candidate.session_id in latest:
                 continue
