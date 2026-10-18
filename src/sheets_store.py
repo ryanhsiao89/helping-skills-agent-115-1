@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import gspread
@@ -16,6 +17,11 @@ from google.oauth2.service_account import Credentials
 
 from .constants import SHEET_HEADERS
 from .usage_time import AuditedUsageSummary, audited_usage_summary
+from .time_recovery import (
+    latest_recovery_events,
+    recovery_candidate,
+    recovery_event_record,
+)
 
 SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
@@ -176,6 +182,9 @@ class NullStore:
     def read_all(self, sheet_name: str) -> list[dict[str, Any]]:
         return []
 
+    def recover_stale_sessions(self, participant_id: str) -> list[dict[str, Any]]:
+        return []
+
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
         return None
 
@@ -296,12 +305,80 @@ class SheetsStore:
         return UsageSummary(started=len(participant_rows), completed=completed)
 
     def audited_usage_summary(self, participant_id: str) -> AuditedUsageSummary:
-        """以 Sessions 與 ChatLogs 交叉核對後計算學期累積上機時間。"""
+        """正常與有稽核紀錄的中斷復原分鐘均併入學期 120／60 進度。"""
         return audited_usage_summary(
             participant_id,
             self.read_all("Sessions"),
             self.read_all("ChatLogs"),
+            self.read_all("TimeRecoveryLedger"),
         )
+
+    def recover_stale_sessions(self, participant_id: str) -> list[dict[str, Any]]:
+        """學生重新登入時，復原有逐輪證據、已閒置的未結束練習。
+
+        每個 Session 最多自動建一筆正式稽核事件；若教師已撤銷，
+        不會再次自動補回。任一寫入失敗則顯示錯誤，不默默聲稱補認列。
+        """
+        participant_id = str(participant_id or "").strip()
+        if not participant_id:
+            return []
+
+        sessions = [
+            row for row in self.read_all("Sessions")
+            if str(row.get("participant_id", "") or "").strip() == participant_id
+            and str(row.get("completion_status", "") or "").strip() == "in_progress"
+        ]
+        if not sessions:
+            return []
+
+        chat_rows = self.read_all("ChatLogs")
+        latest = latest_recovery_events(self.read_all("TimeRecoveryLedger"))
+        now = datetime.now(timezone.utc)
+        added = []
+        for session in sessions:
+            candidate = recovery_candidate(session, chat_rows, now=now)
+            if candidate is None or candidate.session_id in latest:
+                continue
+            event = recovery_event_record(
+                candidate,
+                status="auto_verified",
+                actor="system:otp_verified_student",
+                created_at=now.isoformat(timespec="seconds"),
+                note="Streamlit 意外中斷；已依 Sessions × ChatLogs 審核互動證據與 120 秒緩衝。",
+            )
+            self.append_record("TimeRecoveryLedger", event)
+            latest[candidate.session_id] = event
+            added.append(event)
+        return added
+
+    def append_recovery_decision(
+        self, session_id: str, *, actor: str, status: str, note: str
+    ) -> dict[str, Any]:
+        """教師追加裁定；不刪除舊事件或修改 Sessions。"""
+        if not actor.strip() or not note.strip():
+            raise SheetsStoreError("教師裁定需要帳號與原因，才可留下稽核軌跡。")
+        records = self.read_all("Sessions")
+        session = next(
+            (row for row in records if str(row.get("session_id", "")) == session_id),
+            None,
+        )
+        if session is None:
+            raise SheetsStoreError("找不到指定的 Session。")
+        now = datetime.now(timezone.utc)
+        candidate = recovery_candidate(session, self.read_all("ChatLogs"), now=now)
+        if candidate is None:
+            raise SheetsStoreError("該 Session 不符合復原條件，不可直接修改時間。")
+        if session_id not in latest_recovery_events(self.read_all("TimeRecoveryLedger")):
+            raise SheetsStoreError("這筆 Session 尚未建立原始自動復原紀錄。")
+        event = recovery_event_record(
+            candidate,
+            status=status,
+            actor=f"teacher:{actor.strip()}",
+            created_at=now.isoformat(timespec="microseconds"),
+            note=note.strip(),
+        )
+        self.append_record("TimeRecoveryLedger", event)
+        return event
 
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
         """取得同一已驗證學生最新一筆已保存的跨次續談記憶。"""
