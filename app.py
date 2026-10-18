@@ -709,9 +709,8 @@ def render_usage_progress(store, participant_id: str) -> None:
         st.info("目前為本機預覽模式，無法計算學期累積分鐘。")
         return
     try:
-        # 以已驗證學生身分修復舊的意外中斷，不改寫原始 Sessions。
-        restored = store.recover_stale_sessions(participant_id)
-        usage = store.audited_usage_summary(participant_id)
+        # 一份 Sheets 快照完成復原與分鐘稽核，避免重複讀取大型 ChatLogs。
+        restored, usage = store.recover_and_get_usage(participant_id)
     except SheetsStoreError as exc:
         st.warning(f"目前無法完成分鐘復原或讀取累積時間：{exc}")
         return
