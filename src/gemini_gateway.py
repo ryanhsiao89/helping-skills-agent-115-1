@@ -18,6 +18,11 @@ T = TypeVar("T", bound=BaseModel)
 
 DIALOGUE_REQUEST_TIMEOUT_SECONDS = 45.0
 STRUCTURED_REQUEST_TIMEOUT_SECONDS = 75.0
+EMPTY_RESPONSE_MAX_ATTEMPTS = 2
+
+
+class EmptyModelResponseError(ValueError):
+    """模型成功回應但沒有可用文字內容。"""
 
 
 class GatewayError(RuntimeError):
@@ -119,6 +124,11 @@ def _friendly_gateway_error(
         return (
             f"AI 回應等待超過 {timeout_label}，系統已停止等待。"
             "請確認網路後稍候再送出一次；不需要連續重複送出。"
+        )
+    if isinstance(exc, EmptyModelResponseError):
+        return (
+            "Gemini 暫時沒有回傳文字內容，系統已自動再試一次仍未取得回應。"
+            "這不代表 API Key 無效；請稍候後再送出一次即可，不需要重新申請 Key。"
         )
     if is_invalid_api_key_error(exc):
         return (
@@ -257,13 +267,20 @@ class GeminiGateway:
                     # 若直接 self._client(...).interactions.create(...)，google-genai
                     # 可能在鏈式呼叫期間回收暫時 Client，導致 httpx client 提前關閉。
                     client = self._client(api_key)
-                    response = client.interactions.create(
-                        **request,
-                        timeout=timeout_seconds,
-                    )
-                    text = (response.output_text or "").strip()
+                    text = ""
+                    for response_attempt in range(EMPTY_RESPONSE_MAX_ATTEMPTS):
+                        response = client.interactions.create(
+                            **request,
+                            timeout=timeout_seconds,
+                        )
+                        text = (response.output_text or "").strip()
+                        if text:
+                            break
+                        if response_attempt < EMPTY_RESPONSE_MAX_ATTEMPTS - 1:
+                            time.sleep(0.8)
+
                     if not text:
-                        raise ValueError("模型回傳空白內容")
+                        raise EmptyModelResponseError("模型回傳空白內容")
 
                     latency = int((time.perf_counter() - started) * 1000)
                     return TextResult(text=text, latency_ms=latency, key_slot=index)
