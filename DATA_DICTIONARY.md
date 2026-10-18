@@ -82,6 +82,36 @@ OTP 本身只暫存在目前 Streamlit session 的雜湊狀態，不寫入 Googl
 | evaluator_model、evaluator_temperature | 評量模型與溫度 |
 | status | success 或 error |
 
+## TimeRecoveryLedger（意外中斷時數復原）
+
+追加式（append-only）稽核事件表；原始 `Sessions`、`ChatLogs` 不修改。
+學生再次登入或教師按下補認列後，系統根據完整逐輪對話時間戳記檢查是否符合復原條件。
+`auto_verified`／`teacher_approved` 可計入進度，`teacher_revoked` 則撤銷並保留過去紀錄。
+按資料列先後順序取同一 `session_id` 最後一筆裁定事件；已正常結束的 Session 不再疊加復原分鐘。
+
+| 欄位 | 意義 |
+| --- | --- |
+| event_id | 每一次復原／撤銷裁定事件識別碼 |
+| recovery_id | 同一 `session_id` 的穩定復原識別碼（SHA-256 衍生） |
+| session_id、participant_id、mode | 來源 Session、學習者代碼、諮商師／個案角色 |
+| recovery_status | `auto_verified`、`teacher_approved`、`teacher_revoked` |
+| credited_seconds | 本次核定秒數；撤銷事件填 0 |
+| first_student_at | 第一則實際學生輸入時間 |
+| last_interaction_at | 最後一則有效學生／AI 訊息時間 |
+| student_turns、ai_turns | 實際學生／AI 互動數（不含 system） |
+| source_turn_count | 參與核定的學生／AI 事件數 |
+| source_digest | 來源 turn_id、角色、時間戳記序列的 SHA-256 摘要（不含訊息正文） |
+| policy_version | 補認列演算法版本 |
+| grace_seconds | 最後有效互動後加計的收尾緩衝（上限 120 秒） |
+| actor | 系統或執行補認列／撤銷的教師 |
+| created_at | 此稽核事件的時間戳記 |
+| note | 復原說明或教師撤銷理由 |
+
+自動補認列門檻：`in_progress`、至少兩輪雙向互動、有效分鐘至少 2 分鐘、
+最後一輪已超過 15 分鐘且事件間隔不超過 15 分鐘。正式 120／60 分鐘
+採用正常完成 Session 的稽核秒數與核可復原 Session 秒數的聯集，按 `session_id`
+去重，不覆蓋原始研究資料。
+
 ## ContinuityMemory
 
 僅供 `experience` 體驗模式的跨日續談使用。只有學生主動勾選「保留本次談話供下次續談」或選擇「繼續上次談話」時，結束後才新增一列。學生下次不需要重新上傳逐字稿；完成相同學校 Email 的 OTP 驗證後，系統依 `participant_id` 找到最新已保留記憶。
