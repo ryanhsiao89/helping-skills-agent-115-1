@@ -162,3 +162,71 @@ def test_friendly_sheet_error_includes_google_403_diagnostic():
     assert "Google Sheets 權限驗證失敗（403）" in message
     assert "PERMISSION_DENIED" in message
     assert "The caller does not have permission" in message
+
+
+
+def test_recover_and_get_usage_reads_each_sheet_once(monkeypatch):
+    """一次快照完成自動補認列，避免每次學生登入重複抓取完整 ChatLogs。"""
+    store = object.__new__(SheetsStore)
+    session = {
+        "session_id": "test-crash-28m",
+        "participant_id": "P001",
+        "mode": "practice",
+        "started_at": "2026-10-18T14:23:58+08:00",
+        "ended_at": "",
+        "duration_seconds": "",
+        "completion_status": "in_progress",
+    }
+    times = [
+        ("student_counselor", "2026-10-18T14:25:46+08:00"),
+        ("ai_client", "2026-10-18T14:25:48+08:00"),
+        ("student_counselor", "2026-10-18T14:40:41+08:00"),
+        ("ai_client", "2026-10-18T14:40:43+08:00"),
+        ("student_counselor", "2026-10-18T14:51:28+08:00"),
+        ("ai_client", "2026-10-18T14:51:32+08:00"),
+    ]
+    chat_rows = [
+        {
+            "turn_id": f"turn-{i}",
+            "session_id": "test-crash-28m",
+            "speaker_role": role,
+            "timestamp": stamp,
+        }
+        for i, (role, stamp) in enumerate(times)
+    ]
+    records = {
+        "Sessions": [session],
+        "ChatLogs": chat_rows,
+        "TimeRecoveryLedger": [],
+    }
+    calls = []
+    store.read_all = lambda name: (calls.append(name), list(records[name]))[1]
+
+    def fake_append(sheet_name, event):
+        assert sheet_name == "TimeRecoveryLedger"
+        records[sheet_name].append(event)
+
+    store.append_record = fake_append
+
+    # 模擬授課期間事後重新登入；不依賴測試機執行時間。
+    from datetime import datetime, timezone
+    import src.sheets_store as module
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    events, summary = store.recover_and_get_usage("P001")
+
+    assert len(events) == 1
+    assert summary.total_seconds == 1666
+    assert summary.counselor_seconds == 1666
+    assert calls == ["Sessions", "ChatLogs", "TimeRecoveryLedger"]
+
+    calls.clear()
+    events_again, summary_again = store.recover_and_get_usage("P001")
+    assert not events_again
+    assert summary_again.total_seconds == 1666
+    assert calls == ["Sessions", "ChatLogs", "TimeRecoveryLedger"]
