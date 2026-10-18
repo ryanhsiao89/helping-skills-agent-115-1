@@ -25,12 +25,13 @@
 - 每位學生自行輸入自己的 Gemini API Key；Key 不寫入 Google Sheets、逐字稿或評量紀錄。
 - 完整逐字稿下載：學生可自行保存本次 `.txt` 逐字稿供課後反思。
 - 教師後台提供每位學生的 Session 次數、完成次數、總練習分鐘數、體驗／實作次數與最近活動時間摘要。
+- 意外中斷時數復原：學生回到進度頁時，依已保存 Sessions × ChatLogs 時間證據自動建立 TimeRecoveryLedger，補認列符合條件的分鐘；同一 Session 不重複計算。教師可在後台針對指定 Session 補認列或追加撤銷事件。
 - 明確第一人稱即時危機語句的最低限度安全攔截。
 - GitHub Actions 自動執行語法檢查與離線測試。
 
 ## Google Sheets 資料表
 
-程式會自動建立六張工作表：
+程式會自動建立七張工作表：
 
 - `Sessions`：每一次獨立練習／晤談。
 - `ChatLogs`：完整逐輪原始內容。
@@ -38,6 +39,7 @@
 - `Assessments`：形成性回饋與原始／解析 JSON。
 - `ContinuityMemory`：跨日續談所需的去識別摘要、未竟重點與最後數輪。
 - `StudentRoster`：已驗證學校 Email 與系統 `participant_id` 的對照。
+- `TimeRecoveryLedger`：意外中斷補認列的追加式稽核事件（秒數、來源時間、摘要雜湊、復原政策及教師裁定）。
 
 詳細欄位見 `DATA_DICTIONARY.md`。
 
@@ -91,6 +93,17 @@ Gemini API Key 由學生自己準備，只暫存在目前 Streamlit session，�
 ```
 
 學生可下載回家重新審視自己的對話。續談本身不需要把逐字稿重新上傳給 Agent。
+
+## 意外中斷時數復原（120／60 分鐘）
+
+- **原始證據不變**：不要直接覆寫中斷 Session 的 `ended_at`、`completion_status` 或 ChatLogs 內容。
+- **自動補認列**：學生在 Streamlit 異常中斷後重新完成學校 Email 驗證、開啟進度頁時，系統會檢查其舊 Session；教師也可到後台「異常中斷分鐘復原與撤銷」針對單一 Session 按「確認並補認列」。
+- **最低認列條件**：Session 仍為 `in_progress`；距最後互動至少 15 分鐘；至少有兩則學生輸入及兩則 AI 回應；有實際互動跨度至少 2 分鐘；互動間空窗不超過 15 分鐘。
+- **計算**：第一則學生實際輸入至最後一則學生／AI 有效互動時間，加計原本政策的最多 120 秒收尾緩衝。符合條件時實際秒數以追加事件寫入 `TimeRecoveryLedger`，同時納入總 120 分鐘及 practice 模式的諮商師 60 分鐘。
+- **避免重複**：同一 `session_id` 只認列一次；若 Session 已正常結束，改用原始 Sessions × ChatLogs 稽核結果，不會疊加復原分鐘。
+- **追溯與撤銷**：補認列紀錄保存 `source_digest`、`source_turn_count`、原始時間戳記、復原政策版本、建立者及建立時間。教師可輸入撤銷原因，追加 `teacher_revoked` 事件，系統便會將該補認列排除；不刪除舊事件。對話內容仍只存在 ChatLogs。
+- **案例**：2026-10-18 某 practice Session 的有效時間為 14:25:46 至 14:51:32，核定互動跨度 25 分 46 秒、收尾 2 分鐘，合計 **1,666 秒＝27.8 分鐘**。實際將在學生重新登入或教師執行補認列且 Google Sheets 成功寫入後反映在進度畫面。
+- **不符合門檻的例外**：不自動補認列，保留原始證據，由授課者依課程辦法人工評估；不能單憑學生自述時間直接修改計時欄位。
 
 ## Streamlit Secrets
 
