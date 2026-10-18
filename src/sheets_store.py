@@ -187,6 +187,11 @@ class NullStore:
     ) -> list[dict[str, Any]]:
         return []
 
+    def recover_and_get_usage(
+        self, participant_id: str
+    ) -> tuple[list[dict[str, Any]], AuditedUsageSummary]:
+        return [], self.audited_usage_summary(participant_id)
+
     def latest_continuity(self, participant_id: str) -> dict[str, Any] | None:
         return None
 
@@ -314,6 +319,39 @@ class SheetsStore:
             self.read_all("ChatLogs"),
             self.read_all("TimeRecoveryLedger"),
         )
+
+    def recover_and_get_usage(
+        self, participant_id: str
+    ) -> tuple[list[dict[str, Any]], AuditedUsageSummary]:
+        """在同一次 Sheets 快照中復原並計算進度，避免重複下載整份 ChatLogs。"""
+        participant_id = str(participant_id or "").strip()
+        sessions = self.read_all("Sessions")
+        chat_rows = self.read_all("ChatLogs")
+        recovery_rows = self.read_all("TimeRecoveryLedger")
+        latest = latest_recovery_events(recovery_rows)
+        now = datetime.now(timezone.utc)
+        added = []
+        for session in sessions:
+            if str(session.get("participant_id", "") or "").strip() != participant_id:
+                continue
+            candidate = recovery_candidate(session, chat_rows, now=now)
+            if candidate is None or candidate.session_id in latest:
+                continue
+            event = recovery_event_record(
+                candidate,
+                status="auto_verified",
+                actor="system:otp_verified_student",
+                created_at=now.isoformat(timespec="microseconds"),
+                note="Streamlit 意外中斷：Sessions × ChatLogs 自動稽核補認列。",
+            )
+            self.append_record("TimeRecoveryLedger", event)
+            recovery_rows.append(event)
+            latest[candidate.session_id] = event
+            added.append(event)
+        usage = audited_usage_summary(
+            participant_id, sessions, chat_rows, recovery_rows
+        )
+        return added, usage
 
     def recover_stale_sessions(
         self, participant_id: str, *, actor: str = "system:otp_verified_student"
