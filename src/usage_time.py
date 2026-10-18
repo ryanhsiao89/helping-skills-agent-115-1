@@ -69,6 +69,11 @@ class AuditedUsageSummary:
     total_seconds: int = 0
     counselor_seconds: int = 0
     experience_seconds: int = 0
+    recovered_seconds: int = 0
+
+    @property
+    def recovered_minutes(self) -> float:
+        return round(self.recovered_seconds / 60, 1)
 
     @property
     def total_minutes(self) -> float:
@@ -193,6 +198,7 @@ def audited_usage_summary(
     participant_id: str,
     sessions: Iterable[dict[str, Any]],
     chat_logs: Iterable[dict[str, Any]],
+    recovery_rows: Iterable[dict[str, Any]] = (),
 ) -> AuditedUsageSummary:
     """彙整一位學生的學期累積上機時間，並分列學生擔任諮商師與個案的分鐘數。"""
 
@@ -212,15 +218,50 @@ def audited_usage_summary(
     )
     audited = [audit_session_time(row, chat_rows) for row in session_rows]
     counted = [item for item in audited if item.counted]
-    counselor_seconds = sum(item.seconds for item in counted if item.mode == "practice")
-    experience_seconds = sum(item.seconds for item in counted if item.mode == "experience")
+
+    # 只對尚未正常結束、且已有獨立復原證據紀錄的 Session 補認列。
+    # 已正常結束的 Session 永遠使用 Sessions × ChatLogs 原始稽核值，
+    # 避免同一 Session 一般分鐘與復原分鐘重複累計。
+    from .time_recovery import credited_recoveries
+
+    recovery_map = credited_recoveries(recovery_rows, participant_id=participant_id)
+    normal_ids = {item.session_id for item in counted}
+    restored = []
+    for row in session_rows:
+        sid = str(row.get("session_id", "") or "").strip()
+        if sid in normal_ids or sid not in recovery_map:
+            continue
+        if str(row.get("completion_status", "")).strip() != "in_progress":
+            continue
+        try:
+            seconds = int(float(recovery_map[sid]["credited_seconds"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if seconds <= 0:
+            continue
+        mode = str(row.get("mode", "") or "").strip()
+        if mode not in {"practice", "experience"}:
+            continue
+        restored.append(AuditedSessionTime(
+            session_id=sid,
+            participant_id=participant_id,
+            mode=mode,
+            seconds=seconds,
+            counted=True,
+            reason="recovered_from_ledger",
+        ))
+
+    all_counted = counted + restored
+    counselor_seconds = sum(item.seconds for item in all_counted if item.mode == "practice")
+    experience_seconds = sum(item.seconds for item in all_counted if item.mode == "experience")
 
     return AuditedUsageSummary(
         participant_id=participant_id,
         started_sessions=len(session_rows),
         completed_sessions=completed_sessions,
-        counted_sessions=len(counted),
-        total_seconds=sum(item.seconds for item in counted),
+        counted_sessions=len(all_counted),
+        total_seconds=sum(item.seconds for item in all_counted),
         counselor_seconds=counselor_seconds,
         experience_seconds=experience_seconds,
+        recovered_seconds=sum(item.seconds for item in restored),
     )
