@@ -117,12 +117,13 @@ def recovery_candidate(
            for a, b in zip(timestamps, timestamps[1:])):
         return None
 
-    seconds = int(
+    active_span_seconds = int(
         (_as_utc(last) - _as_utc(first_student)).total_seconds()
-        + POST_INTERACTION_GRACE_SECONDS
     )
-    if seconds < MIN_RECOVERABLE_SECONDS:
+    # 最低兩分鐘是實際互動跨度；不可僅靠 120 秒收尾緩衝過門檻。
+    if active_span_seconds < MIN_RECOVERABLE_SECONDS:
         return None
+    seconds = active_span_seconds + POST_INTERACTION_GRACE_SECONDS
 
     source = [
         [event_id, timestamp.isoformat(), role]
