@@ -709,10 +709,22 @@ def render_usage_progress(store, participant_id: str) -> None:
         st.info("目前為本機預覽模式，無法計算學期累積分鐘。")
         return
     try:
+        # 以已驗證學生身分修復舊的意外中斷，不改寫原始 Sessions。
+        restored = store.recover_stale_sessions(participant_id)
         usage = store.audited_usage_summary(participant_id)
     except SheetsStoreError as exc:
-        st.warning(f"目前無法讀取累積上機分鐘：{exc}")
+        st.warning(f"目前無法完成分鐘復原或讀取累積時間：{exc}")
         return
+
+    if restored:
+        recovered_minutes = sum(
+            int(item["credited_seconds"]) for item in restored
+        ) / 60
+        st.success(
+            f"已根據逐字稿時間證據復原 {len(restored)} 段意外中斷練習，"
+            f"補認列 {recovered_minutes:.1f} 分鐘。"
+            "系統已在 TimeRecoveryLedger 留下獨立稽核紀錄。"
+        )
 
     st.markdown("#### 本學期上機進度")
     total_col, counselor_col = st.columns(2)
@@ -725,6 +737,11 @@ def render_usage_progress(store, participant_id: str) -> None:
         f"{usage.counselor_minutes:.1f} / {COUNSELOR_TARGET_MINUTES}",
     )
     st.progress(usage.progress_ratio)
+    if usage.recovered_seconds > 0:
+        st.caption(
+            f"累積時間中包含異常中斷補認列 {usage.recovered_minutes:.1f} 分鐘，"
+            "已留存來源時間戳記與稽核紀錄供教師查核。"
+        )
     st.caption(
         f"尚需累積 {usage.remaining_minutes:.1f} 分鐘；"
         f"其中諮商師角色尚需 {usage.remaining_counselor_minutes:.1f} 分鐘。"
