@@ -444,6 +444,7 @@ with st.expander("異常中斷分鐘復原與撤銷（教師專用）", expanded
                 restored = store.recover_stale_sessions(
                     candidate_by_id[chosen_id].participant_id,
                     actor=f"teacher:{actor}",
+                    session_id=chosen_id,
                 )
                 recovered = sum(int(row["credited_seconds"]) for row in restored) / 60
                 st.success(
